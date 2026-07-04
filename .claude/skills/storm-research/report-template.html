@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Storm Research Briefing — {{TOPIC}}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --blue: #1a56db;
+    --blue-soft: #e8f0fe;
+    --ink: #1a1a2e;
+    --muted: #5a6472;
+    --line: #e4e8ee;
+    --bg: #ffffff;
+    --panel: #f8fafc;
+    --green: #0f9d58;
+    --amber: #d97706;
+    --red: #dc2626;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: 'Montserrat', system-ui, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    line-height: 1.6;
+    font-size: 16px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 48px 28px 96px; }
+  code, .mono, .score, .chip, .tag { font-family: 'Roboto Mono', monospace; }
+
+  /* Header */
+  header.masthead { border-bottom: 3px solid var(--blue); padding-bottom: 24px; margin-bottom: 8px; }
+  .eyebrow { font-family: 'Roboto Mono', monospace; font-size: 12px; letter-spacing: 2px; text-transform: uppercase; color: var(--blue); font-weight: 500; }
+  h1 { font-size: 34px; font-weight: 800; margin: 10px 0 6px; letter-spacing: -0.5px; }
+  .subtitle { color: var(--muted); font-size: 15px; margin: 0; }
+  .meta-row { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 16px; font-family: 'Roboto Mono', monospace; font-size: 12px; color: var(--muted); }
+  .meta-row span b { color: var(--ink); font-weight: 500; }
+
+  /* Verification banner */
+  .verif-banner {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 18px;
+    background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--green);
+    border-radius: var(--radius); padding: 16px 20px; margin: 28px 0;
+    font-family: 'Roboto Mono', monospace; font-size: 13px;
+  }
+  .verif-banner .vb-label { font-weight: 500; color: var(--green); text-transform: uppercase; letter-spacing: 1px; font-size: 11px; }
+  .verif-stat b { font-size: 18px; font-weight: 700; font-family: 'Montserrat', sans-serif; }
+
+  /* Sections */
+  section { margin: 40px 0; }
+  h2 { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--blue); font-family: 'Roboto Mono', monospace; font-weight: 500; margin: 0 0 16px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+  h3 { font-size: 18px; font-weight: 700; margin: 0 0 6px; }
+  p { margin: 0 0 14px; }
+
+  .summary { background: var(--blue-soft); border-radius: var(--radius); padding: 24px 26px; font-size: 17px; }
+  .summary strong { color: var(--blue); }
+
+  /* Findings */
+  .finding { border: 1px solid var(--line); border-radius: var(--radius); padding: 20px 22px; margin-bottom: 16px; background: var(--bg); }
+  .finding-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+  .finding-head h3 { font-size: 17px; }
+  .score { flex-shrink: 0; font-size: 13px; font-weight: 500; background: var(--ink); color: #fff; border-radius: 20px; padding: 3px 12px; }
+  .score.hi { background: var(--green); }
+  .score.mid { background: var(--amber); }
+  .score.lo { background: var(--red); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .chip { font-size: 11px; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--line); }
+  .chip.support { background: #eaf7ef; border-color: #b7e4c7; color: var(--green); }
+  .chip.challenge { background: #fdeaea; border-color: #f5b7b7; color: var(--red); }
+
+  /* Callout boxes */
+  .box { border-radius: var(--radius); padding: 22px 24px; margin-bottom: 16px; }
+  .box.hidden { background: #f3f0ff; border: 1px solid #ddd6fe; }
+  .box.lens6 { background: var(--panel); border: 1px dashed var(--blue); }
+  .box.frontier { background: var(--ink); color: #fff; }
+  .box.frontier h2 { color: #8ab4ff; border-color: rgba(255,255,255,0.15); }
+  .box .box-tag { font-family: 'Roboto Mono', monospace; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+
+  /* Actionable */
+  ol.actions { padding-left: 0; list-style: none; counter-reset: act; }
+  ol.actions li { counter-increment: act; position: relative; padding: 12px 0 12px 44px; border-bottom: 1px solid var(--line); }
+  ol.actions li:last-child { border-bottom: none; }
+  ol.actions li::before { content: counter(act); position: absolute; left: 0; top: 12px; width: 28px; height: 28px; background: var(--blue); color: #fff; border-radius: 50%; font-family: 'Roboto Mono', monospace; font-size: 13px; display: flex; align-items: center; justify-content: center; font-weight: 500; }
+
+  /* Claim safety */
+  .safety-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .safety-col { border-radius: var(--radius); padding: 18px; border: 1px solid var(--line); }
+  .safety-col h4 { margin: 0 0 12px; font-family: 'Roboto Mono', monospace; font-size: 12px; letter-spacing: 1px; text-transform: uppercase; }
+  .safety-col.assert { background: #eaf7ef; } .safety-col.assert h4 { color: var(--green); }
+  .safety-col.caveat { background: #fef6e7; } .safety-col.caveat h4 { color: var(--amber); }
+  .safety-col.avoid { background: #fdeaea; } .safety-col.avoid h4 { color: var(--red); }
+  .safety-col ul { margin: 0; padding-left: 18px; font-size: 14px; }
+  .safety-col li { margin-bottom: 8px; }
+  @media (max-width: 680px) { .safety-grid { grid-template-columns: 1fr; } }
+
+  /* Contested sidebar */
+  .contested { background: #fff8f0; border: 1px solid #fde3c4; border-left: 4px solid var(--amber); border-radius: var(--radius); padding: 18px 22px; }
+  .contested h2 { color: var(--amber); }
+
+  /* References */
+  ol.refs { padding-left: 22px; font-size: 14px; }
+  ol.refs li { margin-bottom: 12px; }
+  ol.refs a { color: var(--blue); word-break: break-all; }
+  .tag { font-size: 10px; letter-spacing: 0.5px; text-transform: uppercase; padding: 2px 7px; border-radius: 5px; margin-left: 8px; vertical-align: middle; }
+  .tag.confirmed { background: #eaf7ef; color: var(--green); }
+  .tag.partial { background: #fef6e7; color: var(--amber); }
+  .tag.unverified { background: #eef1f5; color: var(--muted); }
+  .tag.false { background: #fdeaea; color: var(--red); }
+
+  .disclosure { font-size: 13px; color: var(--muted); font-style: italic; border-top: 1px solid var(--line); margin-top: 40px; padding-top: 20px; }
+  footer { margin-top: 40px; font-family: 'Roboto Mono', monospace; font-size: 11px; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">Storm Research · Multi-Perspective Briefing</div>
+    <h1>{{TOPIC}}</h1>
+    <p class="subtitle">{{TOPIC_FRAME}}</p>
+    <div class="meta-row">
+      <span>Prepared for: <b>{{READER_ROLE}}</b></span>
+      <span>Date: <b>{{DATE}}</b></span>
+      <span>Overall grade: <b>{{OVERALL_GRADE}}</b></span>
+    </div>
+  </header>
+
+  <!-- Verification banner: filled in Phase 4 -->
+  <div class="verif-banner">
+    <span class="vb-label">✓ Verified</span>
+    <span class="verif-stat"><b>{{CITATIONS_CHECKED}}</b> checked</span>
+    <span class="verif-stat"><b>{{FABRICATED}}</b> fabricated</span>
+    <span class="verif-stat"><b>{{CORRECTED}}</b> corrected</span>
+    <span class="verif-stat"><b>{{DEMOTED}}</b> demoted</span>
+  </div>
+
+  <section>
+    <h2>60-Second Summary</h2>
+    <div class="summary">
+      {{SUMMARY_HTML}}
+    </div>
+  </section>
+
+  <section>
+    <h2>Key Findings — ranked by reliability</h2>
+
+    <!-- Repeat this .finding block 5x, highest reliability first -->
+    <div class="finding">
+      <div class="finding-head">
+        <h3>{{FINDING_TITLE}}</h3>
+        <span class="score hi">{{SCORE}}/10</span>
+      </div>
+      <p>{{FINDING_BODY}}</p>
+      <div class="chips">
+        <span class="chip support">Supported by: {{SUPPORTED_BY}}</span>
+        <span class="chip challenge">Challenged by: {{CHALLENGED_BY}}</span>
+      </div>
+    </div>
+    <!-- /finding -->
+
+  </section>
+
+  <section>
+    <div class="box hidden">
+      <span class="box-tag">Hidden connection</span>
+      <h2 style="border:none;padding:0;margin:8px 0 12px;">The link across all five lenses</h2>
+      <p>{{HIDDEN_CONNECTION}}</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="box lens6">
+      <span class="box-tag">Key assumption · missing 6th lens</span>
+      <h2 style="border:none;padding:0;margin:8px 0 12px;">What no lens addressed</h2>
+      <p>{{SIXTH_LENS}}</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Actionable Insight — for {{READER_ROLE}}</h2>
+    <ol class="actions">
+      <li>{{ACTION_1}}</li>
+      <li>{{ACTION_2}}</li>
+      <li>{{ACTION_3}}</li>
+      <!-- 3-6 items -->
+    </ol>
+  </section>
+
+  <section>
+    <h2>Claim Safety Guide</h2>
+    <div class="safety-grid">
+      <div class="safety-col assert">
+        <h4>Safe to assert</h4>
+        <ul>{{ASSERT_ITEMS}}</ul>
+      </div>
+      <div class="safety-col caveat">
+        <h4>Assert with caveat</h4>
+        <ul>{{CAVEAT_ITEMS}}</ul>
+      </div>
+      <div class="safety-col avoid">
+        <h4>Avoid claiming</h4>
+        <ul>{{AVOID_ITEMS}}</ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- Optional: only render if Phase 4 demoted claims -->
+  <section>
+    <div class="contested">
+      <h2>Contested Signal</h2>
+      {{CONTESTED_HTML}}
+    </div>
+  </section>
+
+  <section>
+    <div class="box frontier">
+      <span class="box-tag" style="color:#8ab4ff;">Frontier question</span>
+      <h2>The one question that would change everything</h2>
+      <p style="font-size:19px;margin:0;">{{FRONTIER_QUESTION}}</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>References</h2>
+    <ol class="refs">
+      <!-- Repeat per citation. Tag classes: confirmed / partial / unverified / false -->
+      <li>
+        {{CITATION_TEXT}} <a href="{{CITATION_URL}}">{{CITATION_URL}}</a>
+        <span class="tag confirmed">Confirmed</span>
+      </li>
+    </ol>
+  </section>
+
+  <p class="disclosure">
+    Panel disclosure: The five expert lenses in this briefing are author-constructed analytical perspectives, not a survey of named domain experts. Agreement across lenses is a strong working hypothesis, not independent field consensus. Every citation was checked against its primary source; see verification tags above.
+  </p>
+
+  <footer>Generated by the Storm Research skill · 4-phase multi-perspective pipeline</footer>
+
+</div>
+</body>
+</html>

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Secure MCP Gateway</title>
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+<div id="app">
+
+  <!-- Arabic-first RTL toggle (W9.5) -->
+  <button id="lang-toggle" title="العربية / English"
+          style="position:fixed;top:8px;inset-inline-end:8px;z-index:99;padding:4px 10px;cursor:pointer">ع / EN</button>
+
+  <!-- Login -->
+  <section id="login-view" class="view">
+    <form class="login-card" id="login-form" onsubmit="return false">
+      <h1>Secure MCP Gateway</h1>
+      <p class="subtitle">بوابة MCP الآمنة · Air-gapped control plane</p>
+      <label>Username</label>
+      <input id="login-user" autocomplete="username" placeholder="sara / khalid / noura / admin">
+      <label>PIN</label>
+      <input id="login-pin" type="password" inputmode="numeric" autocomplete="off" placeholder="6-digit PIN">
+      <button id="login-btn" type="submit">Sign in (certificate + PIN)</button>
+      <p id="login-error" class="error"></p>
+      <div class="hint">
+        <strong>Two-factor: TPM-bound certificate + PIN (no password).</strong>
+        Factor 1 = the cert key sealed in the TPM; factor 2 = the PIN that unlocks it.
+        A username alone won't get you in. 5 wrong PINs lock the identity.<br><br>
+        <strong>Demo users &amp; PINs (documented dev creds — no API serves these):</strong><br>
+        sara / 481920 · khalid / 736154 · noura / 205841 · faisal / 619037 · admin / 950286
+      </div>
+    </form>
+  </section>
+
+  <!-- Main -->
+  <section id="main-view" class="view hidden">
+    <header class="topbar">
+      <div class="brand">Secure MCP Gateway</div>
+      <nav class="tabs">
+        <button class="tab active" data-tab="chat">Chat</button>
+        <button class="tab" data-tab="tools">Tools</button>
+        <button class="tab" data-tab="approvals" id="tab-approvals">Approvals <span id="appr-badge" class="badge hidden">0</span></button>
+        <button class="tab" data-tab="admin" id="tab-admin">Admin</button>
+      </nav>
+      <div class="user-chip">
+        <span id="user-name"></span>
+        <span id="user-clear" class="clear-tag"></span>
+        <button id="logout-btn" class="link">Sign out</button>
+      </div>
+    </header>
+
+    <!-- Chat -->
+    <div class="tabpanel" id="panel-chat">
+      <div id="chat-log" class="chat-log"></div>
+      <div class="composer">
+        <input id="chat-input" placeholder="Try: search security · read document 5 · list records · #call actions.delete_record {&quot;record_id&quot;:&quot;7&quot;}">
+        <button id="chat-send">Send</button>
+      </div>
+    </div>
+
+    <!-- Tools -->
+    <div class="tabpanel hidden" id="panel-tools">
+      <h2>Tools you can see</h2>
+      <p class="muted">Dynamic discovery filtered by your role and clearance. Tier badges come from the gateway registry, not the servers.</p>
+      <div id="tools-list" class="cards"></div>
+    </div>
+
+    <!-- Approvals -->
+    <div class="tabpanel hidden" id="panel-approvals">
+      <h2>Pending approvals</h2>
+      <p class="muted">Human-in-the-loop gate. Tier 2 needs one approver; Tier 3 needs two distinct approvers. You cannot approve your own request.</p>
+      <div id="approvals-list" class="cards"></div>
+    </div>
+
+    <!-- Admin -->
+    <div class="tabpanel hidden" id="panel-admin">
+      <h2>Kill switch</h2>
+      <div class="row">
+        <input id="kill-scope" placeholder="global · server:actions · tool:actions:delete_record · user:sara">
+        <button id="kill-engage" class="danger">Engage</button>
+        <button id="kill-release">Release</button>
+      </div>
+      <div id="kill-active" class="muted"></div>
+
+      <h2>Tool registry</h2>
+      <div id="registry-list" class="cards"></div>
+
+      <h2>Audit log <span id="chain-status" class="chain"></span></h2>
+      <button id="audit-refresh" class="link">Refresh</button>
+      <div id="audit-log" class="audit"></div>
+    </div>
+  </section>
+</div>
+<script src="/ui/app.js"></script>
+</body>
+</html>

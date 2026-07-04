@@ -1,0 +1,60 @@
+name: gateway-ci
+
+# CI gate (W9.1): tests + parser fuzzing + SBOM + vulnerability scan + image sign.
+# In the air-gapped program this runs on the internal CI against the private mirror.
+on:
+  push:
+    paths: ["gateway/**"]
+  pull_request:
+    paths: ["gateway/**"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: gateway
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install (pinned deps only)
+        run: pip install -r requirements.txt
+      - name: Dependency allowlist check
+        run: python scripts/check_deps.py
+      - name: Unit + fuzz tests (no server)
+        run: python -m pytest tests/test_security.py tests/test_auth.py tests/test_fuzz.py -q
+      - name: End-to-end tests (server up)
+        run: |
+          python -m uvicorn app.main:app --host 127.0.0.1 --port 8800 --log-level warning &
+          python - <<'PY'
+          import httpx, time
+          for _ in range(60):
+              try:
+                  if httpx.get("http://127.0.0.1:8800/api/health", timeout=2).json().get("status") == "ok":
+                      break
+              except Exception:
+                  pass
+              time.sleep(1)
+          PY
+          python -m pytest tests/test_e2e.py -q
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image
+        run: docker build -t mcp-gateway:${{ github.sha }} gateway
+      - name: SBOM (Syft)
+        uses: anchore/sbom-action@v0
+        with:
+          image: mcp-gateway:${{ github.sha }}
+      - name: Vulnerability scan (Trivy) — fail on CRITICAL
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: mcp-gateway:${{ github.sha }}
+          severity: CRITICAL
+          exit-code: "1"
+      - name: Sign image (cosign, keyless via internal OIDC)
+        run: echo "cosign sign mcp-gateway:${{ github.sha }}  # wired to internal Fulcio/KMS in prod"

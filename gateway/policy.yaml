@@ -1,0 +1,28 @@
+# Policy-as-code (ABAC) — versioned, reviewed, tested (spec §5.2).
+# Decision = role x clearance x data classification x tool risk tier. Deny by default.
+
+clearance_order: [public, restricted, secret, top_secret]
+
+roles:
+  employee:
+    max_tool_tier: 2        # can *request* up to tier 2 (tier 2 still needs human approval)
+    can_approve: false
+    admin: false
+  analyst:
+    max_tool_tier: 2
+    can_approve: false
+    admin: false
+  approver:
+    max_tool_tier: 2
+    can_approve: true
+    admin: false
+  admin:
+    max_tool_tier: 3
+    can_approve: true
+    admin: true
+
+# Tier semantics (spec §5):
+#   0 auto (read-only) | 1 policy-auto-approved reversible write
+#   2 human approval   | 3 two-person approval
+# Taint rule: tainted args escalate tier 1 -> 2; tainted args on tier >= 2 are
+# highlighted in the approval preview. Tainted values NEVER auto-execute a write.

@@ -1,0 +1,126 @@
+"""Tamper-evident audit log (spec §4.4.9 / §4.9, closes v7 flaw B10).
+
+Append-only JSONL with a hash chain: each record embeds the SHA-256 of the
+previous record, so any edit or deletion breaks the chain and is detectable.
+This is the dev stand-in for a WORM store + SIEM stream.
+
+Log-content minimization: full payloads are hashed; only short, DLP-masked
+excerpts are stored inline. Nothing here should contain raw PII.
+"""
+import hashlib
+import hmac
+import json
+import os
+import threading
+import time
+from pathlib import Path
+
+from .config import DATA_DIR, ROOT
+
+_LOG = DATA_DIR / "audit_log.jsonl"
+_LOCK = threading.Lock()
+GENESIS = "0" * 64
+
+# A9: live event counters (for /api/metrics) + optional SIEM export stream.
+from collections import Counter as _Counter  # noqa: E402
+from .config import CONFIG  # noqa: E402
+
+_COUNTS: _Counter = _Counter()
+_AUDIT_CFG = CONFIG.get("audit", {}) or {}
+_SIEM_STREAM = DATA_DIR / _AUDIT_CFG.get("siem_stream", "siem_stream.jsonl") \
+    if _AUDIT_CFG.get("siem_export") else None
+
+
+def counts() -> dict:
+    with _LOCK:
+        return dict(_COUNTS)
+
+# M4: the chain is keyed (HMAC-SHA256), not a bare hash, so an attacker who can
+# write the log cannot recompute a valid chain without the key. The key is read
+# from MCP_AUDIT_KEY (production: HSM/secret store) or a dev key file kept OUTSIDE
+# the log's directory (pki/), so log-write access alone does not expose it.
+_AUDIT_KEY_FILE = ROOT / "pki" / "audit_hmac.key"
+
+
+def _audit_key() -> bytes:
+    env = os.environ.get("MCP_AUDIT_KEY")
+    if env:
+        return env.encode("utf-8")
+    if not _AUDIT_KEY_FILE.exists():
+        _AUDIT_KEY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _AUDIT_KEY_FILE.write_bytes(os.urandom(32))
+    return _AUDIT_KEY_FILE.read_bytes()
+
+
+def _hash(record: dict) -> str:
+    payload = json.dumps(record, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    return hmac.new(_audit_key(), payload, hashlib.sha256).hexdigest()
+
+
+def _last_hash() -> str:
+    if not _LOG.exists():
+        return GENESIS
+    last = GENESIS
+    with open(_LOG, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                last = json.loads(line)["hash"]
+    return last
+
+
+def payload_digest(obj) -> str:
+    """SHA-256 of an arbitrary JSON-able payload (for minimized logging)."""
+    return hashlib.sha256(
+        json.dumps(obj, sort_keys=True, ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
+
+
+def record(event: str, **fields) -> dict:
+    """Append one event to the chain and return the stored record."""
+    with _LOCK:
+        prev = _last_hash()
+        entry = {
+            "ts": round(time.time(), 3),
+            "event": event,
+            "prev": prev,
+            **fields,
+        }
+        entry["hash"] = _hash(entry)
+        with open(_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        _COUNTS[event] += 1
+        if _SIEM_STREAM is not None:          # mirror to the SIEM feed (WORM/SIEM in prod)
+            with open(_SIEM_STREAM, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        return entry
+
+
+def verify_chain() -> tuple[bool, str]:
+    """Recompute the chain. Returns (ok, message)."""
+    if not _LOG.exists():
+        return True, "empty log"
+    prev = GENESIS
+    n = 0
+    with open(_LOG, encoding="utf-8") as f:
+        for i, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            stored = entry.pop("hash")
+            if entry["prev"] != prev:
+                return False, f"broken link at line {i}: prev mismatch"
+            if _hash(entry) != stored:
+                return False, f"tampered content at line {i}: hash mismatch"
+            prev = stored
+            n += 1
+    return True, f"chain intact: {n} records"
+
+
+def tail(n: int = 100) -> list[dict]:
+    if not _LOG.exists():
+        return []
+    with open(_LOG, encoding="utf-8") as f:
+        lines = [json.loads(x) for x in f if x.strip()]
+    return lines[-n:]

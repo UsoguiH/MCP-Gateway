@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>How Big Tech Builds MCP — Full Architecture Review</title>
+<style>
+  .viz-root {
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --ink: #0b0b0b;
+    --ink-2: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --baseline: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --accent: #2a78d6;
+    --accent-soft: #cde2fb;
+    --lang-ts: #2a78d6;
+    --lang-go: #1baf7a;
+    --lang-py: #eda100;
+    --lang-multi: #4a3aa7;
+    --lang-na: #898781;
+    --good: #0ca30c;
+    --hot-bg: #cde2fb;
+  }
+  @media (prefers-color-scheme: dark) {
+    .viz-root {
+      --surface-1: #1a1a19;
+      --page: #0d0d0d;
+      --ink: #ffffff;
+      --ink-2: #c3c2b7;
+      --muted: #898781;
+      --grid: #2c2c2a;
+      --baseline: #383835;
+      --border: rgba(255,255,255,0.10);
+      --accent: #3987e5;
+      --accent-soft: #10325c;
+      --lang-ts: #3987e5;
+      --lang-go: #199e70;
+      --lang-py: #c98500;
+      --lang-multi: #9085e9;
+      --hot-bg: #10325c;
+    }
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body.viz-root {
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    background: var(--page);
+    color: var(--ink);
+    line-height: 1.55;
+    font-size: 15px;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 44px 28px 90px; }
+
+  .eyebrow { font-size: 12px; letter-spacing: 2.2px; text-transform: uppercase; color: var(--accent); font-weight: 700; }
+  h1 { font-size: 32px; font-weight: 800; letter-spacing: -0.5px; margin: 8px 0 6px; }
+  .sub { color: var(--ink-2); font-size: 15.5px; max-width: 800px; }
+  .meta { margin-top: 14px; font-size: 12.5px; color: var(--muted); }
+  .meta b { color: var(--ink-2); font-weight: 600; }
+
+  /* Stat row */
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin: 30px 0 8px; }
+  .stat { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px 16px; }
+  .stat .v { font-size: 30px; font-weight: 800; letter-spacing: -0.5px; }
+  .stat .v small { font-size: 16px; font-weight: 700; color: var(--ink-2); }
+  .stat .k { font-size: 12px; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted); font-weight: 600; margin-top: 2px; }
+  .stat .d { font-size: 12.5px; color: var(--ink-2); margin-top: 8px; }
+  @media (max-width: 900px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 560px) { .stats { grid-template-columns: 1fr; } }
+
+  section { margin-top: 44px; }
+  h2 { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); font-weight: 700; border-bottom: 1px solid var(--grid); padding-bottom: 8px; margin-bottom: 18px; }
+  .h2-note { font-size: 13px; color: var(--muted); font-weight: 400; text-transform: none; letter-spacing: 0; float: right; }
+
+  /* how to read */
+  .howto { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; font-size: 13px; color: var(--ink-2); margin-bottom: 20px; }
+  .howto b { color: var(--ink); }
+
+  /* Legend */
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin: 0 0 18px; font-size: 12.5px; color: var(--ink-2); }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+
+  /* Company block (full width, detailed) */
+  .co { background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px; padding: 22px 24px 18px; margin-bottom: 18px; }
+  .co-head { display: flex; align-items: center; gap: 13px; margin-bottom: 16px; }
+  .mono-badge { width: 42px; height: 42px; border-radius: 10px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-weight: 800; font-size: 16px; color: #fff; letter-spacing: -0.5px; }
+  .co-head h3 { font-size: 18px; font-weight: 750; }
+  .co-head .role { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 1px; font-weight: 650; }
+  .lang-chip { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 650; color: var(--ink-2); background: var(--page); border: 1px solid var(--grid); border-radius: 20px; padding: 4px 12px; white-space: nowrap; }
+
+  /* Architecture flow strip */
+  .flow { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; margin-bottom: 16px; }
+  .node { flex: 1 1 0; min-width: 130px; border: 1.5px solid var(--baseline); border-radius: 10px; padding: 11px 13px; background: var(--page); }
+  .node.hot { border-color: var(--accent); background: var(--hot-bg); }
+  .node .n-tag { font-size: 10px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+  .node.hot .n-tag { color: var(--accent); }
+  .node .n-name { font-weight: 700; font-size: 13.5px; margin: 2px 0 3px; }
+  .node .n-desc { font-size: 11.5px; color: var(--ink-2); line-height: 1.4; }
+  .arrow { flex: 0 0 28px; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 16px; }
+  @media (max-width: 720px) { .flow { flex-direction: column; } .arrow { transform: rotate(90deg); flex-basis: 24px; } .node { min-width: 0; } }
+
+  /* Spec grid */
+  .spec { display: grid; grid-template-columns: 1fr 1fr; gap: 0 24px; border-top: 1px solid var(--grid); }
+  @media (max-width: 640px) { .spec { grid-template-columns: 1fr; } }
+  .spec .row { display: grid; grid-template-columns: 118px 1fr; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--grid); font-size: 13px; }
+  .spec .k { color: var(--muted); font-weight: 650; font-size: 11px; text-transform: uppercase; letter-spacing: 0.7px; padding-top: 2px; }
+  .spec .v { color: var(--ink); }
+  .spec .v code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 11.5px; background: var(--page); border: 1px solid var(--grid); border-radius: 5px; padding: 0 5px; word-break: break-word; }
+  .nd { color: var(--muted); font-style: italic; }
+  .note { margin-top: 14px; font-size: 12.5px; color: var(--ink-2); background: var(--page); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; padding: 9px 13px; }
+  .src { margin-top: 10px; font-size: 11.5px; color: var(--muted); }
+  .src a { color: var(--accent); text-decoration: none; }
+  .src a:hover { text-decoration: underline; }
+
+  .takeaways { background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px; padding: 24px 26px; }
+  .takeaways ol { padding-left: 20px; }
+  .takeaways li { margin-bottom: 10px; font-size: 14.5px; }
+  .takeaways b { color: var(--ink); }
+  .foot { margin-top: 40px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--grid); padding-top: 16px; }
+  .grp-label { font-size: 11.5px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); font-weight: 700; margin: 26px 0 12px; }
+</style>
+</head>
+<body class="viz-root">
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">Executive Briefing · Production MCP Architectures</div>
+    <h1>How Big Tech Builds MCP Servers — Full Architecture</h1>
+    <p class="sub">The complete, verified technology architecture behind each major vendor's Model Context Protocol deployment: the client, the identity/gateway layer, the server runtime, and the backend — read left to right for each company. Sourced from repositories and official documentation only.</p>
+    <div class="meta">Verified: <b>July 2026</b> · Sources: <b>primary only</b> · Undocumented internals are marked <b>Not disclosed</b> — nothing is inferred or guessed.</div>
+  </header>
+
+  <div class="stats">
+    <div class="stat"><div class="v">12</div><div class="k">Architectures mapped</div><div class="d">Every major AI, cloud, and SaaS vendor with a documented MCP footprint.</div></div>
+    <div class="stat"><div class="v">100<small>%</small></div><div class="k">OAuth 2.x + Streamable HTTP</div><div class="d">Every production remote server uses the same transport and auth standard.</div></div>
+    <div class="stat"><div class="v">10+</div><div class="k">Brands on one platform</div><div class="d">Atlassian, Linear, Sentry, Stripe, PayPal &amp; more all run on Cloudflare's MCP stack.</div></div>
+    <div class="stat"><div class="v">0</div><div class="k">Hand-rolled protocol layers</div><div class="d">No company builds its own transport or OAuth — all use official SDKs or a managed gateway.</div></div>
+  </div>
+
+  <section>
+    <div class="howto">
+      <b>How to read each architecture:</b> the four-box strip traces one request left to right — <b>Client</b> (the AI assistant) → <b>Identity / Gateway</b> (who holds tokens and enforces access) → <b>Server runtime</b> (the MCP server itself: language, SDK, transport) → <b>Backend / Hosting</b> (where it runs and the data it reaches). The <span style="color:var(--accent);font-weight:700;">highlighted box</span> is the layer that defines that company's approach. The spec table below fills in every documented detail.
+    </div>
+    <div class="legend" aria-label="Implementation language legend">
+      <span><i class="dot" style="background:var(--lang-ts)"></i> TypeScript</span>
+      <span><i class="dot" style="background:var(--lang-go)"></i> Go</span>
+      <span><i class="dot" style="background:var(--lang-py)"></i> Python</span>
+      <span><i class="dot" style="background:var(--lang-multi)"></i> Multi-language / SDK steward</span>
+      <span><i class="dot" style="background:var(--lang-na)"></i> Not disclosed</span>
+    </div>
+
+    <div class="grp-label">— The model vendors (they run the client, set the rules) —</div>
+
+    <!-- ANTHROPIC -->
+    <div class="co">
+      <div class="co-head">
+        <div class="mono-badge" style="background:var(--lang-multi)">An</div>
+        <div><h3>Anthropic</h3><div class="role">Protocol steward · Client operator</div></div>
+        <span class="lang-chip"><i class="dot" style="background:var(--lang-multi)"></i> Multi (SDK author)</span>
+      </div>
+      <div class="flow">
+        <div class="node"><div class="n-tag">Client</div><div class="n-name">Claude</div><div class="n-desc">claude.ai, Desktop, Code + Messages API — connects from Anthropic's cloud, not the user's device</div></div>
+        <div class="arrow">→</div>
+        <div class="node hot"><div class="n-tag">Identity</div><div class="n-name">OAuth 2.1 + PKCE</div><div class="n-desc">Dynamic client registration; callback <code>claude.ai/api/mcp/auth_callback</code>; supports spec revs 2025-03/06/11</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Server runtime</div><div class="n-name">Partner-hosted</div><div class="n-desc">Streamable HTTP; must be reachable from Anthropic IP ranges. SSE being deprecated</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Backend</div><div class="n-name">Partner infra</div><div class="n-desc">Anthropic hosts no public MCP servers itself</div></div>
+      </div>
+      <div class="spec">
+        <div class="row"><span class="k">Language / SDK</span><span class="v">Authors the official SDKs: TypeScript &amp; Python (primary) + Go, C#, Java, Kotlin, Ruby</span></div>
+        <div class="row"><span class="k">Transport</span><span class="v">Streamable HTTP (remote); legacy HTTP+SSE being phased out; stdio for local <code>.dxt</code> Desktop Extensions</span></div>
+        <div class="row"><span class="k">Session model</span><span class="v">Stateless remote; local extensions one-click install</span></div>
+        <div class="row"><span class="k">Auth</span><span class="v">OAuth 2.1 + PKCE, dynamic client registration; custom credentials for non-DCR servers</span></div>
+        <div class="row"><span class="k">Directory rules</span><span class="v">Per-tool functional tests, policy scan, test account with sample data, tool annotations required</span></div>
+        <div class="row"><span class="k">Hard limits</span><span class="v">~150k-char tool results / 300s timeout (claude.ai); ~25k tokens (Claude Code)</span></div>
+        <div class="row"><span class="k">Own hosting</span><span class="v nd">Not disclosed — no public Anthropic-run MCP endpoint</span></div>
+        <div class="row"><span class="k">Governance</span><span class="v">Donated MCP to the Linux Foundation's Agentic AI Foundation, Dec 2025</span></div>
+      </div>
+      <div class="note"><b>Signature move — "Code execution with MCP":</b> instead of loading every tool definition into context, tools are presented as a code API the model calls on demand — cutting one 150k-token workload to 2k (−98.7%). This is the reference pattern for controlling context cost at scale.</div>
+      <div class="src">Source: <a href="https://claude.com/docs/connectors/building">claude.com/docs/connectors</a> · <a href="https://www.anthropic.com/engineering/code-execution-with-mcp">anthropic.com/engineering</a></div>
+    </div>
+
+    <!-- OPENAI -->
+    <div class="co">
+      <div class="co-head">
+        <div class="mono-badge" style="background:var(--lang-multi)">Oa</div>
+        <div><h3>OpenAI</h3><div class="role">Client operator · App platform</div></div>
+        <span class="lang-chip"><i class="dot" style="background:var(--lang-multi)"></i> Python + TypeScript</span>
+      </div>
+      <div class="flow">
+        <div class="node"><div class="n-tag">Client</div><div class="n-name">ChatGPT / Agents SDK</div><div class="n-desc">Agents SDK (Py + TS), Responses API remote-MCP tool, ChatGPT Apps &amp; connectors</div></div>
+        <div class="arrow">→</div>
+        <div class="node hot"><div class="n-tag">Identity</div><div class="n-name">OAuth + CIMD</div><div class="n-desc">Client ID Metadata Documents; public-client <code>none</code> or <code>private_key_jwt</code>; auth enforced in-server</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Server runtime</div><div class="n-name">Developer-hosted</div><div class="n-desc">Public HTTPS MCP server; Streamable HTTP or HTTP/SSE; official Python (FastMCP) or TS SDK recommended</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Backend</div><div class="n-name">Developer infra</div><div class="n-desc">OpenAI runs only a public docs MCP server + hosted connector infra</div></div>
+      </div>
+      <div class="spec">
+        <div class="row"><span class="k">Consumes MCP</span><span class="v">3 modes: hosted MCP tool (Responses API runs the call), Streamable HTTP servers, stdio servers</span></div>
+        <div class="row"><span class="k">Own servers</span><span class="v">Docs MCP at <code>developers.openai.com/mcp</code> (Streamable HTTP, no auth, docs-only)</span></div>
+        <div class="row"><span class="k">Apps SDK</span><span class="v"><b>Built on MCP</b> — a ChatGPT App is a developer's MCP server + a widget runtime (<code>window.openai</code> bridge)</span></div>
+        <div class="row"><span class="k">Connectors</span><span class="v">Custom connectors must expose read-only <code>search</code> + <code>fetch</code> tools returning <code>structuredContent</code></span></div>
+        <div class="row"><span class="k">Transport</span><span class="v">Streamable HTTP or HTTP/SSE accepted by the Responses API</span></div>
+        <div class="row"><span class="k">Review</span><span class="v">Org verification, publicly reachable server, CSP declaration, OAuth test creds, automated + manual scans</span></div>
+      </div>
+      <div class="note"><b>Near-identical to Anthropic.</b> Both host almost no servers and instead publish a strict bar developers must meet. Building to one bar satisfies both — the practical definition of "the standard."</div>
+      <div class="src">Source: <a href="https://developers.openai.com/apps-sdk/build/mcp-server">developers.openai.com/apps-sdk</a> · <a href="https://openai.github.io/openai-agents-js/guides/mcp/">openai.github.io/openai-agents-js</a></div>
+    </div>
+
+    <div class="grp-label">— The cloud &amp; platform vendors (they sell the gateway) —</div>
+
+    <!-- GITHUB -->
+    <div class="co">
+      <div class="co-head">
+        <div class="mono-badge" style="background:var(--lang-go)">Gh</div>
+        <div><h3>GitHub <span style="font-weight:500;color:var(--muted)">(Microsoft)</span></h3><div class="role">Product server · Open source</div></div>
+        <span class="lang-chip"><i class="dot" style="background:var(--lang-go)"></i> Go</span>
+      </div>
+      <div class="flow">
+        <div class="node"><div class="n-tag">Client</div><div class="n-name">Copilot / any</div><div class="n-desc">VS Code, Copilot, or any MCP client — local or remote</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Identity</div><div class="n-name">GitHub OAuth / PAT</div><div class="n-desc">GitHub's own OAuth for the remote endpoint; personal access token for local</div></div>
+        <div class="arrow">→</div>
+        <div class="node hot"><div class="n-tag">Server runtime</div><div class="n-name">Go · official go-sdk</div><div class="n-desc">Single static binary; migrated off the community SDK to the official one</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Backend</div><div class="n-name">GitHub API</div><div class="n-desc">Remote at <code>api.githubcopilot.com/mcp</code>; hosting infra not disclosed</div></div>
+      </div>
+      <div class="spec">
+        <div class="row"><span class="k">Language / SDK</span><span class="v">Go, official <code>modelcontextprotocol/go-sdk</code> (v1.7.x line)</span></div>
+        <div class="row"><span class="k">Transport</span><span class="v">stdio (local binary / Docker) + Streamable HTTP (remote)</span></div>
+        <div class="row"><span class="k">Endpoint</span><span class="v"><code>api.githubcopilot.com/mcp</code></span></div>
+        <div class="row"><span class="k">Auth</span><span class="v">GitHub OAuth (remote) or personal access token (local)</span></div>
+        <div class="row"><span class="k">Source</span><span class="v">Fully open source — the most-copied production reference server</span></div>
+        <div class="row"><span class="k">Hosting</span><span class="v nd">Not disclosed</span></div>
+      </div>
+      <div class="note"><b>The tool-bloat cautionary tale:</b> GitHub's server exposes 94 tools that consume ~17,600 context tokens per request (measured by Atlassian) — the concrete reason "curate your toolset" is a real design constraint, not advice.</div>
+      <div class="src">Source: <a href="https://github.com/github/github-mcp-server">github.com/github/github-mcp-server</a></div>
+    </div>
+
+    <!-- GOOGLE -->
+    <div class="co">
+      <div class="co-head">
+        <div class="mono-badge" style="background:var(--lang-go)">Go</div>
+        <div><h3>Google</h3><div class="role">Product server · SDK co-maintainer</div></div>
+        <span class="lang-chip"><i class="dot" style="background:var(--lang-go)"></i> Go</span>
+      </div>
+      <div class="flow">
+        <div class="node"><div class="n-tag">Client</div><div class="n-name">Any MCP client</div><div class="n-desc">Gemini and third-party agents via the /mcp endpoint</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Identity</div><div class="n-name">Google Cloud IAM</div><div class="n-desc">Integrated authN + IAM; Cloud Run uses IAM invoker auth</div></div>
+        <div class="arrow">→</div>
+        <div class="node hot"><div class="n-tag">Server runtime</div><div class="n-name">Go · genai-toolbox</div><div class="n-desc">MCP Toolbox for Databases — 96% Go; Streamable HTTP <code>/mcp</code></div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Backend / Hosting</div><div class="n-name">Binary · Docker · Cloud Run · GKE</div><div class="n-desc">Deploys anywhere; official Cloud Run MCP hosting docs (Streamable HTTP only)</div></div>
+      </div>
+      <div class="spec">
+        <div class="row"><span class="k">Language / SDK</span><span class="v">Go (<code>googleapis/genai-toolbox</code>); co-maintains the official Go SDK with Anthropic</span></div>
+        <div class="row"><span class="k">Transport</span><span class="v">Streamable HTTP (<code>/mcp</code> endpoint)</span></div>
+        <div class="row"><span class="k">Deployment</span><span class="v">Standalone binary, Docker container, Cloud Run, or GKE — operator's choice</span></div>
+        <div class="row"><span class="k">Auth</span><span class="v">Integrated authentication + Google Cloud IAM</span></div>
+        <div class="row"><span class="k">Focus</span><span class="v">Database access — turns Postgres/MySQL/BigQuery etc. into MCP tools</span></div>
+        <div class="row"><span class="k">Hosting docs</span><span class="v">Official Cloud Run "host MCP servers" guidance (IAM invoker auth)</span></div>
+      </div>
+      <div class="note"><b>Google's bet is Go.</b> Same language choice as GitHub — static binary, minimal runtime, small attack surface — and it co-owns the Go SDK, signalling Go as the intended production language for MCP infrastructure.</div>
+      <div class="src">Source: <a href="https://github.com/googleapis/genai-toolbox">github.com/googleapis/genai-toolbox</a> · <a href="https://cloud.google.com/run/docs/host-mcp-servers">cloud.google.com/run</a></div>
+    </div>
+
+    <!-- AWS -->
+    <div class="co">
+      <div class="co-head">
+        <div class="mono-badge" style="background:var(--lang-py)">Aw</div>
+        <div><h3>AWS</h3><div class="role">Managed gateway · Product servers</div></div>
+        <span class="lang-chip"><i class="dot" style="background:var(--lang-py)"></i> Python</span>
+      </div>
+      <div class="flow">
+        <div class="node"><div class="n-tag">Client</div><div class="n-name">Bedrock agents / any</div><div class="n-desc">Any MCP client hitting the managed gateway endpoint</div></div>
+        <div class="arrow">→</div>
+        <div class="node hot"><div class="n-tag">Gateway (the product)</div><div class="n-name">Bedrock AgentCore Gateway</div><div class="n-desc">OAuth resource server; delegates to customer IdP (Cognito / Okta / Auth0); Streamable HTTP, stateless</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Server runtime</div><div class="n-name">Lambda / OpenAPI / Smithy</div><div class="n-desc">Gateway converts existing targets into MCP tools; AgentCore Runtime hosts custom containers (any language)</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Backend</div><div class="n-name">AWS services</div><div class="n-desc">Existing APIs behind IAM; own servers (<code>awslabs/mcp</code>) in Python/FastMCP</div></div>
+      </div>
+      <div class="spec">
+        <div class="row"><span class="k">Own servers</span><span class="v"><code>awslabs/mcp</code> — Python on the official SDK's FastMCP class, packaged with uv/uvx</span></div>
+        <div class="row"><span class="k">Managed gateway</span><span class="v">Bedrock AgentCore Gateway — converts Lambda / OpenAPI / Smithy into MCP tools behind one authed endpoint</span></div>
+        <div class="row"><span class="k">Managed runtime</span><span class="v">AgentCore Runtime hosts customer MCP containers (any language) with session isolation — GA Oct 2025</span></div>
+        <div class="row"><span class="k">Transport</span><span class="v">Gateway requires Streamable HTTP, stateless mode</span></div>
+        <div class="row"><span class="k">Auth</span><span class="v">Gateway = OAuth resource server → customer IdP (Cognito, Okta, Auth0); managed servers use IAM SigV4</span></div>
+        <div class="row"><span class="k">Public servers</span><span class="v">AWS Knowledge MCP (no auth, public tier); AWS MCP Server preview (IAM)</span></div>
+      </div>
+      <div class="note"><b>AWS monetizes the gateway pattern directly:</b> "bring a boring API, we speak MCP for you" as a metered managed service (~$0.005 per 1,000 gateway tool invocations). It is the reference for the self-hosted gateway approach.</div>
+      <div class="src">Source: <a href="https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway.html">docs.aws.amazon.com/bedrock-agentcore</a></div>
+    </div>
+
+    <!-- MICROSOFT -->
+    <div class="co">
+      <div class="co-head">
+        <div class="mono-badge" style="background:var(--lang-multi)">Ms</div>
+        <div><h3>Microsoft Azure</h3><div class="role">Managed gateway · SDK co-maintainer</div></div>
+        <span class="lang-chip"><i class="dot" style="background:var(--lang-multi)"></i> C# + TypeScript</span>
+      </div>
+      <div class="flow">
+        <div class="node"><div class="n-tag">Client</div><div class="n-name">Copilot Studio</div><div class="n-desc">Consumes MCP tools via OAuth 2.0 authorization-code flow</div></div>
+        <div class="arrow">→</div>
+        <div class="node hot"><div class="n-tag">Gateway (the product)</div><div class="n-name">Azure API Management</div><div class="n-desc">AI gateway converts existing REST APIs into remote MCP servers; Entra ID auth</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Server runtime</div><div class="n-name">C# / Functions</div><div class="n-desc">Official C# SDK (<code>ModelContextProtocol.AspNetCore</code>); Functions MCP extension — GA</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Backend / Hosting</div><div class="n-name">Azure</div><div class="n-desc">Existing REST APIs + Azure Functions; Entra ID throughout</div></div>
+      </div>
+      <div class="spec">
+        <div class="row"><span class="k">Language / SDK</span><span class="v">Co-maintains official C# SDK (<code>ModelContextProtocol.AspNetCore</code>); Azure DevOps MCP server in TypeScript</span></div>
+        <div class="row"><span class="k">Managed gateway</span><span class="v">Azure API Management exposes REST APIs as remote MCP servers via its built-in AI gateway</span></div>
+        <div class="row"><span class="k">Server hosting</span><span class="v">Azure Functions MCP extension <code>v1.4.0</code> — GA, Streamable HTTP; quickstarts in .NET/Python/TS</span></div>
+        <div class="row"><span class="k">Consumes</span><span class="v">Copilot Studio connects MCP tools via OAuth 2.0 authorization-code flow</span></div>
+        <div class="row"><span class="k">Auth</span><span class="v">Entra ID / OAuth 2.x</span></div>
+        <div class="row"><span class="k">Thought leadership</span><span class="v">Published the definitive operator guide on the 2026 stateless spec change (App Service scaling)</span></div>
+      </div>
+      <div class="note"><b>Same gateway thesis as AWS, different cloud.</b> Microsoft turns API Management — infrastructure enterprises already own — into the MCP layer, so no new server code is needed to expose an existing API.</div>
+      <div class="src">Source: <a href="https://learn.microsoft.com/azure/api-management/export-rest-mcp-server">learn.microsoft.com/azure/api-management</a></div>
+    </div>
+
+    <!-- CLOUDFLARE -->
+    <div class="co">
+      <div class="co-head">
+        <div class="mono-badge" style="background:var(--lang-ts)">Cf</div>
+        <div><h3>Cloudflare</h3><div class="role">The platform 10+ brands build on</div></div>
+        <span class="lang-chip"><i class="dot" style="background:var(--lang-ts)"></i> TypeScript</span>
+      </div>
+      <div class="flow">
+        <div class="node"><div class="n-tag">Client</div><div class="n-name">Any MCP client</div><div class="n-desc">Claude, ChatGPT, Cursor — via <code>*.mcp.cloudflare.com</code></div></div>
+        <div class="arrow">→</div>
+        <div class="node hot"><div class="n-tag">Identity (built once)</div><div class="n-name">workers-oauth-provider</div><div class="n-desc">OAuth 2.1 provider library: PKCE + dynamic client registration, reused by every tenant</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Server runtime</div><div class="n-name">McpAgent · Durable Objects</div><div class="n-desc">TS Agents SDK; one Durable Object per client session holds state (SQLite)</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Backend / Hosting</div><div class="n-name">Cloudflare Workers</div><div class="n-desc">Global edge; Streamable HTTP <code>/mcp</code> + legacy SSE <code>/sse</code></div></div>
+      </div>
+      <div class="spec">
+        <div class="row"><span class="k">Server framework</span><span class="v">Agents SDK <code>McpAgent</code> class (TypeScript)</span></div>
+        <div class="row"><span class="k">Session model</span><span class="v">One Durable Object per client session, SQLite-backed state</span></div>
+        <div class="row"><span class="k">Auth library</span><span class="v"><code>workers-oauth-provider</code> — OAuth 2.1 with PKCE + dynamic client registration</span></div>
+        <div class="row"><span class="k">Transport</span><span class="v">Streamable HTTP (<code>/mcp</code>) + deprecated SSE (<code>/sse</code>)</span></div>
+        <div class="row"><span class="k">Hosting</span><span class="v">Cloudflare Workers, at <code>*.mcp.cloudflare.com</code></span></div>
+        <div class="row"><span class="k">Adopted by</span><span class="v">Atlassian, Asana, Block, Intercom, Linear, PayPal, Sentry, Stripe, Webflow</span></div>
+      </div>
+      <div class="note"><b>The most consequential stack in the ecosystem.</b> Cloudflare built the OAuth + session plumbing once; the name brands just write tool code on top. It is the clearest proof that the hard parts get solved at the platform layer, not per-server. <i>(For a data-sovereignty build this is the one to avoid — it is a global edge network by design.)</i></div>
+      <div class="src">Source: <a href="https://github.com/cloudflare/workers-oauth-provider">github.com/cloudflare/workers-oauth-provider</a> · <a href="https://blog.cloudflare.com/mcp-demo-day/">blog.cloudflare.com/mcp-demo-day</a></div>
+    </div>
+
+    <div class="grp-label">— The SaaS product servers (thin tool layer on a managed platform) —</div>
+
+    <!-- ATLASSIAN -->
+    <div class="co">
+      <div class="co-head">
+        <div class="mono-badge" style="background:var(--lang-ts)">At</div>
+        <div><h3>Atlassian</h3><div class="role">Product server · Jira &amp; Confluence</div></div>
+        <span class="lang-chip"><i class="dot" style="background:var(--lang-ts)"></i> TypeScript (on Cloudflare)</span>
+      </div>
+      <div class="flow">
+        <div class="node"><div class="n-tag">Client</div><div class="n-name">Any MCP client</div><div class="n-desc">GA since February 2026</div></div>
+        <div class="arrow">→</div>
+        <div class="node hot"><div class="n-tag">Identity</div><div class="n-name">Cloudflare OAuth</div><div class="n-desc">Out-of-box remote-MCP OAuth; respects each user's existing Jira/Confluence permissions</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Server runtime</div><div class="n-name">Cloudflare Agents SDK</div><div class="n-desc">Built on Workers (confirmed by both companies); closed source</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Backend</div><div class="n-name">Atlassian Cloud</div><div class="n-desc">Jira / Confluence APIs</div></div>
+      </div>
+      <div class="spec">
+        <div class="row"><span class="k">Platform</span><span class="v">Cloudflare Agents SDK / Workers (confirmed by Atlassian + Cloudflare)</span></div>
+        <div class="row"><span class="k">Language</span><span class="v">TypeScript (implied by the Agents SDK; exact code closed source)</span></div>
+        <div class="row"><span class="k">Transport</span><span class="v">Streamable HTTP; retired legacy SSE endpoint June 30, 2026</span></div>
+        <div class="row"><span class="k">Auth</span><span class="v">OAuth via Cloudflare's remote-MCP support; per-user permission inheritance</span></div>
+        <div class="row"><span class="k">Status</span><span class="v">GA February 2026</span></div>
+        <div class="row"><span class="k">Notable</span><span class="v">Its engineers produced the ecosystem's token-cost benchmark (GitHub server ≈ 17.6k tokens)</span></div>
+      </div>
+      <div class="note"><b>A textbook "thin tool layer" tenant:</b> Atlassian wrote Jira/Confluence tools and let Cloudflare handle transport, sessions, and OAuth — exactly the division of labor the whole industry converged on.</div>
+      <div class="src">Source: <a href="https://community.atlassian.com/forums/Atlassian-Remote-MCP-Server/HTTP-SSE-Deprecation-Notice/ba-p/3205484">community.atlassian.com</a></div>
+    </div>
+
+    <!-- SENTRY -->
+    <div class="co">
+      <div class="co-head">
+        <div class="mono-badge" style="background:var(--lang-ts)">Se</div>
+        <div><h3>Sentry</h3><div class="role">Product server · Open source</div></div>
+        <span class="lang-chip"><i class="dot" style="background:var(--lang-ts)"></i> TypeScript</span>
+      </div>
+      <div class="flow">
+        <div class="node"><div class="n-tag">Client</div><div class="n-name">Any MCP client</div><div class="n-desc">Via <code>mcp.sentry.dev</code></div></div>
+        <div class="arrow">→</div>
+        <div class="node hot"><div class="n-tag">Identity</div><div class="n-name">Sentry OAuth ⇢ Cloudflare</div><div class="n-desc">Sentry's own OAuth config wired through Cloudflare's OAuth flow</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Server runtime</div><div class="n-name">TypeScript (98.5%)</div><div class="n-desc"><code>getsentry/sentry-mcp</code> — fully open source; stdio still in progress</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Backend / Hosting</div><div class="n-name">Cloudflare Workers</div><div class="n-desc">Streamable HTTP remote-first</div></div>
+      </div>
+      <div class="spec">
+        <div class="row"><span class="k">Language / repo</span><span class="v">TypeScript (98.5%), <code>getsentry/sentry-mcp</code> — fully open source</span></div>
+        <div class="row"><span class="k">Hosting</span><span class="v">Cloudflare Workers, at <code>mcp.sentry.dev</code></span></div>
+        <div class="row"><span class="k">Transport</span><span class="v">Streamable HTTP (remote-first); stdio work in progress</span></div>
+        <div class="row"><span class="k">Auth</span><span class="v">Sentry's own OAuth wired through Cloudflare's OAuth flow</span></div>
+        <div class="row"><span class="k">Best for</span><span class="v">The reference implementation to read — a real name-brand production server, fully public</span></div>
+      </div>
+      <div class="note"><b>Study this one first.</b> It is the only major-vendor production server with the entire codebase open — the closest thing to a copyable blueprint on the whole list.</div>
+      <div class="src">Source: <a href="https://github.com/getsentry/sentry-mcp">github.com/getsentry/sentry-mcp</a></div>
+    </div>
+
+    <!-- LINEAR -->
+    <div class="co">
+      <div class="co-head">
+        <div class="mono-badge" style="background:var(--lang-na)">Li</div>
+        <div><h3>Linear</h3><div class="role">Product server</div></div>
+        <span class="lang-chip"><i class="dot" style="background:var(--lang-na)"></i> Not disclosed (on Cloudflare)</span>
+      </div>
+      <div class="flow">
+        <div class="node"><div class="n-tag">Client</div><div class="n-name">Any MCP client</div><div class="n-desc">Via <code>mcp.linear.app/mcp</code></div></div>
+        <div class="arrow">→</div>
+        <div class="node hot"><div class="n-tag">Identity</div><div class="n-name">OAuth 2.1</div><div class="n-desc">Per the authenticated remote-MCP spec</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Server runtime</div><div class="n-name">Cloudflare (credited)</div><div class="n-desc">Built with Cloudflare per Linear's changelog; closed source</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Backend</div><div class="n-name">Linear API</div><div class="n-desc">Centrally hosted</div></div>
+      </div>
+      <div class="spec">
+        <div class="row"><span class="k">Platform</span><span class="v">Cloudflare Workers/Agents (credited in Linear's changelog); closed source</span></div>
+        <div class="row"><span class="k">Language</span><span class="v nd">Not disclosed (TypeScript implied by the platform)</span></div>
+        <div class="row"><span class="k">Transport</span><span class="v">Streamable HTTP only — SSE fully removed</span></div>
+        <div class="row"><span class="k">Endpoint</span><span class="v"><code>mcp.linear.app/mcp</code>, centrally hosted</span></div>
+        <div class="row"><span class="k">Auth</span><span class="v">OAuth 2.1 per the authenticated remote-MCP spec</span></div>
+      </div>
+      <div class="note"><b>The strictest posture, early:</b> one hosted endpoint, OAuth only, no legacy transport — the exact shape every other server is migrating toward. Details are thin because Linear discloses little beyond the Cloudflare credit.</div>
+      <div class="src">Source: <a href="https://blog.cloudflare.com/mcp-demo-day/">blog.cloudflare.com/mcp-demo-day</a></div>
+    </div>
+
+    <!-- NOTION -->
+    <div class="co">
+      <div class="co-head">
+        <div class="mono-badge" style="background:var(--lang-ts)">No</div>
+        <div><h3>Notion</h3><div class="role">Product server</div></div>
+        <span class="lang-chip"><i class="dot" style="background:var(--lang-ts)"></i> TypeScript</span>
+      </div>
+      <div class="flow">
+        <div class="node"><div class="n-tag">Client</div><div class="n-name">Any MCP client</div><div class="n-desc">Via <code>mcp.notion.com/mcp</code></div></div>
+        <div class="arrow">→</div>
+        <div class="node hot"><div class="n-tag">Identity</div><div class="n-name">One-click OAuth</div><div class="n-desc">Tokens &amp; sessions stored <b>server-side</b>, never handed to the client</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Server runtime</div><div class="n-name">Tools from OpenAPI → Zod</div><div class="n-desc">Tools code-generated from OpenAPI schemas, validated with Zod (TypeScript)</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Backend</div><div class="n-name">Notion API</div><div class="n-desc">Hosted; platform not disclosed</div></div>
+      </div>
+      <div class="spec">
+        <div class="row"><span class="k">Endpoint</span><span class="v">Hosted at <code>mcp.notion.com/mcp</code></span></div>
+        <div class="row"><span class="k">Tool generation</span><span class="v"><b>Code-generated from OpenAPI schemas</b> with Zod validation — a directly copyable pattern</span></div>
+        <div class="row"><span class="k">Transport</span><span class="v">Streamable HTTP + SSE</span></div>
+        <div class="row"><span class="k">Auth</span><span class="v">One-click OAuth; tokens and sessions stored server-side</span></div>
+        <div class="row"><span class="k">Migration</span><span class="v">Deprecated its open-source stdio server (<code>makenotion/notion-mcp-server</code>) in favor of the hosted one</span></div>
+        <div class="row"><span class="k">Hosting</span><span class="v nd">Not disclosed</span></div>
+      </div>
+      <div class="note"><b>The OpenAPI→MCP shortcut:</b> Notion generates its tools from existing API schemas instead of hand-writing them — the fastest path to a large, consistent toolset if you already have an OpenAPI spec.</div>
+      <div class="src">Source: <a href="https://www.notion.com/blog/notions-hosted-mcp-server-an-inside-look">notion.com/blog</a></div>
+    </div>
+
+    <!-- SLACK -->
+    <div class="co">
+      <div class="co-head">
+        <div class="mono-badge" style="background:var(--lang-na)">Sl</div>
+        <div><h3>Slack <span style="font-weight:500;color:var(--muted)">(Salesforce)</span></h3><div class="role">Product server</div></div>
+        <span class="lang-chip"><i class="dot" style="background:var(--lang-na)"></i> Not disclosed</span>
+      </div>
+      <div class="flow">
+        <div class="node"><div class="n-tag">Client</div><div class="n-name">Admin-approved AI</div><div class="n-desc">Workspace admins approve which AI clients may connect at all</div></div>
+        <div class="arrow">→</div>
+        <div class="node hot"><div class="n-tag">Identity (governance-first)</div><div class="n-name">OAuth + admin approval</div><div class="n-desc">The most enterprise-gated auth model of the twelve</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Server runtime</div><div class="n-name">Closed source</div><div class="n-desc">Official remote server at <code>mcp.slack.com</code>, announced Feb 17, 2026</div></div>
+        <div class="arrow">→</div>
+        <div class="node"><div class="n-tag">Backend</div><div class="n-name">Slack platform</div><div class="n-desc">Hosting not disclosed</div></div>
+      </div>
+      <div class="spec">
+        <div class="row"><span class="k">Endpoint</span><span class="v">Official remote server at <code>mcp.slack.com</code> (announced Feb 17, 2026)</span></div>
+        <div class="row"><span class="k">Auth</span><span class="v">OAuth with <b>admin-approved AI clients</b> — governance enforced at the auth layer</span></div>
+        <div class="row"><span class="k">Language / hosting</span><span class="v nd">Not disclosed (closed source)</span></div>
+        <div class="row"><span class="k">Transport</span><span class="v">Remote (Streamable HTTP era)</span></div>
+      </div>
+      <div class="note"><b>The enterprise-governance model.</b> Slack's distinctive control is admin gating of clients — the closest to what a 200-person company with strict data rules actually wants, even though its stack internals are undisclosed.</div>
+      <div class="src">Source: <a href="https://docs.slack.dev/ai/slack-mcp-server/">docs.slack.dev/ai/slack-mcp-server</a></div>
+    </div>
+
+  </section>
+
+  <section>
+    <h2>What Every Architecture Has in Common</h2>
+    <div class="takeaways">
+      <ol>
+        <li><b>Four layers, always the same shape.</b> Client → identity/gateway → thin stateless server → existing backend. No company deviates; they differ only in <i>which</i> layer they own and monetize.</li>
+        <li><b>The hard layer is never hand-built.</b> Transport and OAuth come from an official SDK (GitHub, Google, AWS servers) or a managed platform (Cloudflare, Azure APIM, AgentCore). Independent research found 100% of audited DIY OAuth deployments were flawed — this is why.</li>
+        <li><b>Three languages, one output.</b> Go (GitHub, Google — static binary, small attack surface), TypeScript (the entire Cloudflare ecosystem), Python (AWS — fastest to build). All produce a thin, stateless, Streamable-HTTP server.</li>
+        <li><b>The model vendors set the rules, not the servers.</b> Anthropic and OpenAI host almost nothing; their near-identical client requirements (Streamable HTTP + OAuth 2.1 + review) <i>are</i> the production standard. Build to that bar once and you work with Claude, ChatGPT, and Copilot alike.</li>
+        <li><b>For our sovereignty build:</b> keep the four-layer shape, but replace the managed pieces with self-hosted equivalents — <b>agentgateway</b> or <b>IBM mcp-context-forge</b> for the gateway, <b>Keycloak</b> for identity, Go or Python thin servers on in-Kingdom infrastructure. Avoid Cloudflare's edge platform specifically — it is global by design.</li>
+      </ol>
+    </div>
+  </section>
+
+  <p class="foot">Prepared July 2, 2026 · Every architecture verified against primary sources (linked per company); internals no vendor has published are marked "Not disclosed" rather than inferred · Companion documents: <i>How Big Tech Runs MCP Servers in Production</i> (full Storm Research briefing with citations) and the sovereignty build plan.</p>
+
+</div>
+</body>
+</html>

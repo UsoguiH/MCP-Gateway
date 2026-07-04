@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Storm Research Briefing — How Big Tech Runs MCP Servers in Production</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --blue: #1a56db;
+    --blue-soft: #e8f0fe;
+    --ink: #1a1a2e;
+    --muted: #5a6472;
+    --line: #e4e8ee;
+    --bg: #ffffff;
+    --panel: #f8fafc;
+    --green: #0f9d58;
+    --amber: #d97706;
+    --red: #dc2626;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: 'Montserrat', system-ui, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    line-height: 1.6;
+    font-size: 16px;
+  }
+  .wrap { max-width: 880px; margin: 0 auto; padding: 48px 28px 96px; }
+  code, .mono, .score, .chip, .tag { font-family: 'Roboto Mono', monospace; }
+
+  /* Header */
+  header.masthead { border-bottom: 3px solid var(--blue); padding-bottom: 24px; margin-bottom: 8px; }
+  .eyebrow { font-family: 'Roboto Mono', monospace; font-size: 12px; letter-spacing: 2px; text-transform: uppercase; color: var(--blue); font-weight: 500; }
+  h1 { font-size: 34px; font-weight: 800; margin: 10px 0 6px; letter-spacing: -0.5px; }
+  .subtitle { color: var(--muted); font-size: 15px; margin: 0; }
+  .meta-row { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 16px; font-family: 'Roboto Mono', monospace; font-size: 12px; color: var(--muted); }
+  .meta-row span b { color: var(--ink); font-weight: 500; }
+
+  /* Verification banner */
+  .verif-banner {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 18px;
+    background: var(--panel); border: 1px solid var(--line); border-left: 4px solid var(--green);
+    border-radius: var(--radius); padding: 16px 20px; margin: 28px 0;
+    font-family: 'Roboto Mono', monospace; font-size: 13px;
+  }
+  .verif-banner .vb-label { font-weight: 500; color: var(--green); text-transform: uppercase; letter-spacing: 1px; font-size: 11px; }
+  .verif-stat b { font-size: 18px; font-weight: 700; font-family: 'Montserrat', sans-serif; }
+
+  /* Sections */
+  section { margin: 40px 0; }
+  h2 { font-size: 13px; letter-spacing: 2px; text-transform: uppercase; color: var(--blue); font-family: 'Roboto Mono', monospace; font-weight: 500; margin: 0 0 16px; border-bottom: 1px solid var(--line); padding-bottom: 8px; }
+  h3 { font-size: 18px; font-weight: 700; margin: 0 0 6px; }
+  p { margin: 0 0 14px; }
+
+  .summary { background: var(--blue-soft); border-radius: var(--radius); padding: 24px 26px; font-size: 17px; }
+  .summary strong { color: var(--blue); }
+
+  /* Findings */
+  .finding { border: 1px solid var(--line); border-radius: var(--radius); padding: 20px 22px; margin-bottom: 16px; background: var(--bg); }
+  .finding-head { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+  .finding-head h3 { font-size: 17px; }
+  .score { flex-shrink: 0; font-size: 13px; font-weight: 500; background: var(--ink); color: #fff; border-radius: 20px; padding: 3px 12px; }
+  .score.hi { background: var(--green); }
+  .score.mid { background: var(--amber); }
+  .score.lo { background: var(--red); }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .chip { font-size: 11px; padding: 3px 10px; border-radius: 6px; border: 1px solid var(--line); }
+  .chip.support { background: #eaf7ef; border-color: #b7e4c7; color: var(--green); }
+  .chip.challenge { background: #fdeaea; border-color: #f5b7b7; color: var(--red); }
+
+  /* Callout boxes */
+  .box { border-radius: var(--radius); padding: 22px 24px; margin-bottom: 16px; }
+  .box.hidden { background: #f3f0ff; border: 1px solid #ddd6fe; }
+  .box.lens6 { background: var(--panel); border: 1px dashed var(--blue); }
+  .box.frontier { background: var(--ink); color: #fff; }
+  .box.frontier h2 { color: #8ab4ff; border-color: rgba(255,255,255,0.15); }
+  .box .box-tag { font-family: 'Roboto Mono', monospace; font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: var(--muted); }
+
+  /* Actionable */
+  ol.actions { padding-left: 0; list-style: none; counter-reset: act; }
+  ol.actions li { counter-increment: act; position: relative; padding: 12px 0 12px 44px; border-bottom: 1px solid var(--line); }
+  ol.actions li:last-child { border-bottom: none; }
+  ol.actions li::before { content: counter(act); position: absolute; left: 0; top: 12px; width: 28px; height: 28px; background: var(--blue); color: #fff; border-radius: 50%; font-family: 'Roboto Mono', monospace; font-size: 13px; display: flex; align-items: center; justify-content: center; font-weight: 500; }
+
+  /* Claim safety */
+  .safety-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  .safety-col { border-radius: var(--radius); padding: 18px; border: 1px solid var(--line); }
+  .safety-col h4 { margin: 0 0 12px; font-family: 'Roboto Mono', monospace; font-size: 12px; letter-spacing: 1px; text-transform: uppercase; }
+  .safety-col.assert { background: #eaf7ef; } .safety-col.assert h4 { color: var(--green); }
+  .safety-col.caveat { background: #fef6e7; } .safety-col.caveat h4 { color: var(--amber); }
+  .safety-col.avoid { background: #fdeaea; } .safety-col.avoid h4 { color: var(--red); }
+  .safety-col ul { margin: 0; padding-left: 18px; font-size: 14px; }
+  .safety-col li { margin-bottom: 8px; }
+  @media (max-width: 680px) { .safety-grid { grid-template-columns: 1fr; } }
+
+  /* Contested sidebar */
+  .contested { background: #fff8f0; border: 1px solid #fde3c4; border-left: 4px solid var(--amber); border-radius: var(--radius); padding: 18px 22px; }
+  .contested h2 { color: var(--amber); }
+
+  /* References */
+  ol.refs { padding-left: 22px; font-size: 14px; }
+  ol.refs li { margin-bottom: 12px; }
+  ol.refs a { color: var(--blue); word-break: break-all; }
+  .tag { font-size: 10px; letter-spacing: 0.5px; text-transform: uppercase; padding: 2px 7px; border-radius: 5px; margin-left: 8px; vertical-align: middle; }
+  .tag.confirmed { background: #eaf7ef; color: var(--green); }
+  .tag.partial { background: #fef6e7; color: var(--amber); }
+  .tag.unverified { background: #eef1f5; color: var(--muted); }
+  .tag.false { background: #fdeaea; color: var(--red); }
+
+  .disclosure { font-size: 13px; color: var(--muted); font-style: italic; border-top: 1px solid var(--line); margin-top: 40px; padding-top: 20px; }
+  footer { margin-top: 40px; font-family: 'Roboto Mono', monospace; font-size: 11px; color: var(--muted); text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">Storm Research · Multi-Perspective Briefing</div>
+    <h1>How Big Tech Runs MCP Servers in Production</h1>
+    <p class="subtitle">Architecture, security, and operations of Model Context Protocol servers at Anthropic, OpenAI, Google, Microsoft, AWS, Salesforce and peers — mined as a blueprint for building your own.</p>
+    <div class="meta-row">
+      <span>Prepared for: <b>An engineer building a production MCP server</b></span>
+      <span>Date: <b>2026-07-02</b></span>
+      <span>Overall grade: <b>B+</b></span>
+    </div>
+  </header>
+
+  <div class="verif-banner">
+    <span class="vb-label">✓ Verified</span>
+    <span class="verif-stat"><b>23</b> checked</span>
+    <span class="verif-stat"><b>0</b> fabricated</span>
+    <span class="verif-stat"><b>8</b> corrected</span>
+    <span class="verif-stat"><b>9</b> demoted</span>
+    <span style="flex-basis:100%;font-size:12px;color:var(--muted);">Note: verification of the economics cluster (6 citations) was stopped before completion at the user's request — those figures are tagged Unverified and quarantined in the Contested Signal section.</span>
+  </div>
+
+  <section>
+    <h2>60-Second Summary</h2>
+    <div class="summary">
+      <p><strong>The settled part:</strong> MCP won the AI-integration standard war — adopted by OpenAI, Google, Microsoft, AWS and Salesforce, and donated by Anthropic to the Linux Foundation's Agentic AI Foundation on December 9, 2025. But no major vendor runs an MCP server the way the early demos implied. In production, MCP is a <strong>thin, stateless, OAuth-fronted façade over an existing API, behind a managed gateway</strong> (AWS Bedrock AgentCore, Cloudflare's remote-MCP stack, Copilot Studio connectors), with ruthless tool curation and per-user scoped tokens.</p>
+      <p><strong>The settled threat model:</strong> the dominant risk is not vulnerable server code — measured vulnerability rates in open-source servers are single-digit percentages. It is <strong>model-side instruction-following</strong> (tool poisoning succeeds 36.5% of the time on average in the peer-reviewed MCPTox benchmark, and <em>more</em> often on more capable models) plus <strong>broken auth implementations</strong> (a 2026 measurement found flaws in 100% of the 119 OAuth-enabled remote MCP servers it audited). Every name-brand incident — Asana's cross-tenant leak, GitHub's prompt-injection exfiltration, Supabase's database exposure — broke at tenant isolation, token scope, or injected instructions, never at the protocol's cryptography.</p>
+      <p><strong>The contested part:</strong> whether the vendor playbook is a genuine solution (the practitioner view), liability transfer for an architecturally unsolved injection problem (the skeptic view), or a toll-booth business model dressed as security guidance (the economist view). All three readings agree on what to <em>build</em>; they disagree on what it <em>guarantees</em>.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Key Findings — ranked by reliability</h2>
+
+    <div class="finding">
+      <div class="finding-head">
+        <h3>1. The threat is the model, not the server: tool poisoning and broken auth dominate MCP risk</h3>
+        <span class="score hi">9/10</span>
+      </div>
+      <p>The peer-reviewed MCPTox benchmark (AAAI-26) ran tool-poisoning attacks against 20 LLM agents on 45 live MCP servers with 353 authentic tools: average attack success was <b>36.5%</b>, the best-refusing model refused under 3% of the time, and — critically — <b>more capable models were <em>more</em> susceptible</b>, because the attack exploits instruction-following itself (o1-mini: 72.8%). A 2026 measurement of 7,973 live remote MCP servers found <b>40.6% expose tools with no authentication</b>, and of the 119 OAuth-enabled servers audited, <b>100% had at least one auth flaw</b> (325 total; the work yielded 9 CVEs). Meanwhile, static analysis of 1,899 open-source servers flagged only ~7.2% with conventional vulnerabilities (detections, not confirmed exploits). The risk concentrates in the model layer and the auth layer — not in exotic server bugs.</p>
+      <div class="chips">
+        <span class="chip support">Supported by: Academic (peer-reviewed + verified measurements), Skeptic (incident pattern), Practitioner (confused-deputy focus)</span>
+        <span class="chip challenge">Challenged by: vendor narrative that newer/more-aligned models reduce risk — the measured effect is inverted</span>
+      </div>
+    </div>
+
+    <div class="finding">
+      <div class="finding-head">
+        <h3>2. Every name-brand production incident broke at the same three joints: tenant isolation, token scope, injected instructions</h3>
+        <span class="score hi">9/10</span>
+      </div>
+      <p>Asana's MCP server exposed data across roughly 1,000 customer organizations via a tenant-isolation logic bug — exposure ran May 1 to June 4, 2025, and the feature was pulled for about two weeks. GitHub's MCP server let a poisoned public issue steer an agent into exfiltrating private-repo data (Invariant Labs, May 2025), because the agent's token had more reach than the task needed — a demonstrated "toxic agent flow" that worked even on frontier models. Supabase's MCP setup leaked SQL data when a support-ticket injection met a <code>service_role</code> connection that bypasses row-level security (General Analysis, July 2025). The supply chain is also live: the rogue <code>postmark-mcp</code> npm package silently BCC'd every sent email to an attacker (Koi Security, Sept 2025 — the first documented malicious MCP server in the wild), and <code>mcp-remote</code> (CVE-2025-6514, CVSS 9.6, 437,000+ downloads at disclosure) allowed RCE via a malicious server's OAuth metadata. None of these were protocol-level flaws; all were scope, isolation, and trust failures.</p>
+      <div class="chips">
+        <span class="chip support">Supported by: Skeptic, Practitioner, Academic — same incidents cited independently; all five verified against primary sources</span>
+        <span class="chip challenge">Challenged by: Academic base rates — headline incidents do not make the ecosystem a "malware swamp" (~7% measured detection rate)</span>
+      </div>
+    </div>
+
+    <div class="finding">
+      <div class="finding-head">
+        <h3>3. The converged production architecture is a managed gateway over a boring API — nobody at scale hand-rolls the MCP layer</h3>
+        <span class="score hi">8/10</span>
+      </div>
+      <p>AWS Bedrock AgentCore Gateway converts existing APIs, Lambda functions, and services into managed MCP-compatible tools; Cloudflare's <code>workers-oauth-provider</code> plus Durable Objects (one per client session) is a flagship remote-MCP hosting stack; Microsoft exposes MCP through Copilot Studio connectors; Anthropic distributes vetted integrations through a curated connectors directory with enterprise identity provisioning. The pattern in every case: the vendor's own engineers write ordinary API/tool code, and a hardened shared layer speaks MCP, handles OAuth 2.1 token custody, and enforces per-user scoping. The MCP server itself is deliberately thin and stateless.</p>
+      <div class="chips">
+        <span class="chip support">Supported by: Practitioner (vendor docs, all verified), Historian (matches the plugin→curated-store cleanup pattern), Economist (that's where the revenue pools)</span>
+        <span class="chip challenge">Challenged by: Skeptic — gateways do not fix in-band prompt injection; Economist — the blueprint doubles as a toll booth</span>
+      </div>
+    </div>
+
+    <div class="finding">
+      <div class="finding-head">
+        <h3>4. The spec is converging on stateless + stricter auth — and it breaks things on the way</h3>
+        <span class="score hi">8/10</span>
+      </div>
+      <p>The MCP specification's 2026-07-28 release candidate (pre-announced with a ten-week validation window; final publication July 28, 2026) removes the <code>initialize</code> handshake and the <code>Mcp-Session-Id</code> header entirely — the protocol goes stateless, ending the sticky-routing and shared-session-store contortions that made horizontal scaling painful (Microsoft documented the Azure App Service scaling win directly). HTTP+SSE transport has been deprecated since spec version 2025-03-26 in favor of Streamable HTTP, with vendor cutoffs landing through mid-2026 (Atlassian dropped it June 30, 2026). Auth is now mandatory OAuth 2.1 with RFC 8707 resource indicators and audience validation. Governance moved to the Linux Foundation's Agentic AI Foundation in December 2025. For a builder this cuts both ways: the direction is clear (stateless, strict auth), but the spec ships breaking changes roughly every six to twelve months, and major clients (Cursor, Claude, VS Code) weren't even requesting refresh tokens — an interoperability gap the project had to formalize guidance for (SEP-2207).</p>
+      <div class="chips">
+        <span class="chip support">Supported by: Practitioner and Skeptic citing the same primary spec sources — all six spec claims verified against modelcontextprotocol.io</span>
+        <span class="chip challenge">Challenged by: Skeptic's framing — a spec this young in churn means "how the majors do it" is a moving target</span>
+      </div>
+    </div>
+
+    <div class="finding">
+      <div class="finding-head">
+        <h3>5. Context economics is a first-order design constraint: tool definitions are expensive</h3>
+        <span class="score mid">7/10</span>
+      </div>
+      <p>Atlassian's engineering measurement found GitHub's official MCP server exposes 94 tools consuming roughly 17.6k tokens of definitions per request, and that combining several large servers easily spends 30k+ tokens before any work happens. Anthropic's own mitigation — executing code against MCP tools loaded on demand rather than stuffing every definition into context — cut a 150,000-token workload to 2,000 tokens (a 98.7% saving, per Anthropic's engineering post, verified verbatim). The operational lesson from every vendor: curate tools ruthlessly, keep schemas terse, and treat tool-count as a budget, not a feature list. (Both figures are single-vendor engineering measurements without published formal methodology — hence the mid confidence.)</p>
+      <div class="chips">
+        <span class="chip support">Supported by: Practitioner (operator data, primary sources verified), Economist (token consumption is the revenue engine — vendors measure it precisely)</span>
+        <span class="chip challenge">Challenged by: no lens disputed the direction, but the figures are vendor self-measurements, not audited benchmarks</span>
+      </div>
+    </div>
+
+  </section>
+
+  <section>
+    <div class="box hidden">
+      <span class="box-tag">Hidden connection</span>
+      <h2 style="border:none;padding:0;margin:8px 0 12px;">The link across all five lenses</h2>
+      <p>Every lens independently converged on the same choke point: <b>the intermediary layer</b>. The practitioner says gateways solve auth and sessions. The academic says fixes must be architectural — deterministic controls outside the model, because the model's susceptibility rises with capability. The historian says permissive plugin ecosystems always get re-architected into curated, sandboxed intermediaries after the security disasters (ActiveX → extension stores), and that protocols live or die by the default client. The economist says the money pools exactly there — metered gateways, token consumption, curated registries. In other words: <b>the security architecture and the market structure are the same diagram.</b> Whoever owns the interposition layer collects both the safety guarantees and the rent. For a builder, the gateway is not overhead to minimize — it is the strategic ground the entire industry is fighting to occupy.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="box lens6">
+      <span class="box-tag">Key assumption · missing 6th lens</span>
+      <h2 style="border:none;padding:0;margin:8px 0 12px;">What no lens addressed</h2>
+      <p><b>The insider operator and the regulator.</b> Every lens worked outside-in: public docs, incident disclosures, registry scans, academic measurements of <em>open</em> servers. There is no independent evidence about how Anthropic, Google, or AWS actually operate MCP internally — SLOs, monitoring, red-team cadence, incident response — so "how the majors do it" is really "what the majors publish." (Even Asana never issued a public disclosure; the record exists only because customers shared their notification emails.) And no lens addressed liability: when an agent leaks cross-tenant data through an MCP chain, is the server operator, the client vendor, or the model provider legally responsible? EU AI Act enforcement and data-protection rulings could redistribute that liability onto server operators — which would flip the economics of running one. This briefing's conclusions assume the published architecture reflects the practiced one, and that the liability regime stays vague. Both assumptions are unverified.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Actionable Insight — for an engineer building a production MCP server</h2>
+    <ol class="actions">
+      <li><b>Do not hand-roll the auth/session layer.</b> Put your tools behind a managed layer (Cloudflare's <code>workers-oauth-provider</code>, AWS AgentCore Gateway) or implement OAuth 2.1 with RFC 8707 resource indicators exactly to spec. 100% of the 119 audited DIY OAuth deployments had at least one flaw — assume yours will too unless it's boring, borrowed, and tested.</li>
+      <li><b>Design stateless from day one.</b> The spec version finalizing July 28, 2026 deletes sessions and the handshake entirely. Any sticky-session or shared-session-store infrastructure you build now is scheduled for demolition. Thin, stateless MCP façade over your real API.</li>
+      <li><b>Make tenant isolation your #1 test surface.</b> Asana's leak was a logic bug, not a hack. Write cross-tenant access tests, scope every token to the calling user (never a service-role or broad PAT), and verify isolation on every tool path before launch.</li>
+      <li><b>Assume prompt injection succeeds and design so it doesn't matter.</b> Default tools to read-only, require human confirmation for destructive or outbound actions, and restrict egress — break the "lethal trifecta" (private data + untrusted content + exfiltration channel) structurally, because no model refuses reliably (&lt;3% refusal in the peer-reviewed benchmark).</li>
+      <li><b>Treat tool-count as a token budget.</b> Curate to the minimum viable toolset, keep schemas terse, and for large tool surfaces consider the code-execution-over-MCP pattern instead of loading every definition into context.</li>
+      <li><b>Build to the strictest client's bar and pin spec versions.</b> Protocol history says the default client's policy becomes the de facto spec. Track the official MCP blog and SEP changelog for breaking changes; the spec has broken things roughly every six to twelve months.</li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>Claim Safety Guide</h2>
+    <div class="safety-grid">
+      <div class="safety-col assert">
+        <h4>Safe to assert</h4>
+        <ul>
+          <li>Tool poisoning succeeds ~36.5% on average against real MCP servers, with refusal rates under 3% — and more capable models are <em>more</em> susceptible (peer-reviewed, AAAI-26).</li>
+          <li>100% of 119 audited OAuth-enabled remote MCP servers had at least one auth flaw; 40.6% of 7,973 live servers expose tools with no auth (figures verified against the primary study).</li>
+          <li>The Asana, GitHub MCP, Supabase, postmark-mcp, and mcp-remote (CVE-2025-6514) incidents happened as described — all verified against primary disclosures.</li>
+          <li>MCP requires OAuth 2.1 + RFC 8707 resource indicators; the 2026-07-28 spec removes sessions and the handshake (stateless), with breaking changes.</li>
+          <li>MCP governance moved to the Linux Foundation's Agentic AI Foundation (Dec 9, 2025; co-founded by Anthropic, OpenAI, Block).</li>
+        </ul>
+      </div>
+      <div class="safety-col caveat">
+        <h4>Assert with caveat</h4>
+        <ul>
+          <li>"~7.2% of open-source MCP servers have vulnerabilities" — static-analysis detections, not confirmed exploits; still a preprint.</li>
+          <li>GitHub's MCP server costs ~17.6k tokens in tool definitions — a single Atlassian engineering measurement, no formal methodology published.</li>
+          <li>Endor Labs' 82%/34% figures measure <em>use of risk-prone APIs</em> across 2,614 implementations, not confirmed vulnerabilities.</li>
+          <li>"More capable models are more susceptible" rests on one benchmark (single-turn interactions only).</li>
+          <li>Anthropic's 150k→2k token reduction is real but is Anthropic's own example workload.</li>
+        </ul>
+      </div>
+      <div class="safety-col avoid">
+        <h4>Avoid claiming</h4>
+        <ul>
+          <li>"82% of MCP servers are vulnerable to path traversal" — misreads API-usage stats as exploitability.</li>
+          <li>"43% of MCP servers have command injection" — Equixly pen-test with an undisclosed sample size.</li>
+          <li>"40+ MCP CVEs in official SDKs in 2026" — traces to an uncited blog aggregation with garbled dates.</li>
+          <li>"MCP calls are ~3x slower" — the citation chain ends at a post with no quantitative benchmarks.</li>
+          <li>Any specific economics figure in this report (Anthropic valuation/run-rate, market forecasts, Agentforce ARR, AgentCore pricing) — verification incomplete; see Contested Signal.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="contested">
+      <h2>Contested Signal</h2>
+      <p><b>Ecosystem vulnerability rates conflict by methodology, not by facts.</b> Endor Labs (82% path-traversal-prone file ops, 34% command-injection-prone APIs, n=2,614) measured risk-prone API <em>usage</em>; Equixly (43% command injection) ran penetration tests on an undisclosed sample; the arXiv study (7.2%, n=1,899) counted static-analysis detections. These are three different instruments — secondaries routinely merge them into one scary number. None is comparable to another.</p>
+      <p><b>OX Security's "~200,000 vulnerable deployments"</b> (April 2026 stdio advisory) is OX's own estimate from a companion post; the downstream CVEs were assigned to third-party products (LiteLLM, Windsurf, Flowise…), and Anthropic responded that the SDK behavior is by design. Real advisory, contested framing.</p>
+      <p><b>The entire economics cluster is unverified.</b> Anthropic's $30B Series G at $380B post-money and $30B revenue run rate, the MarketsandMarkets $7.84B→$52.62B agent-market forecast, Salesforce's ~$1.4B Agentforce ARR and pricing, AWS AgentCore's $0.005/1k-invocation pricing, and startup funding figures were queued for primary-source verification, but that verification run was stopped before completing. Treat all of them as directional color, not facts.</p>
+      <p><b>mcp-server-git CVEs (2025-68143/44/45)</b> are real (NVD, published Dec 17, 2025 — not January 2026 as blogs claim) but "RCE chain" is a blogger characterization; NVD describes path traversal and argument injection with severity ratings that disagree between NVD (9.1) and the CNA (6.4) on the third CVE.</p>
+    </div>
+  </section>
+
+  <section>
+    <div class="box frontier">
+      <span class="box-tag" style="color:#8ab4ff;">Frontier question</span>
+      <h2>The one question that would change everything</h2>
+      <p style="font-size:19px;margin:0;">Can deterministic architecture — gateways, scoping, egress control — hold the line indefinitely against a model layer whose injection susceptibility <em>rises</em> with capability, or does safe tool use ultimately require solving in-band prompt injection at the model level, which no vendor has done?</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>References</h2>
+    <ol class="refs">
+      <li>Wang et al., "MCPTox: A Benchmark for Tool Poisoning on Real-World MCP Servers," AAAI-26, DOI 10.1609/aaai.v40i42.40895. <a href="https://arxiv.org/abs/2508.14925">https://arxiv.org/abs/2508.14925</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Zhou et al., "A First Measurement Study on Authentication Security in Real-World Remote MCP Servers" (preprint, May 2026). <a href="https://arxiv.org/abs/2605.22333">https://arxiv.org/abs/2605.22333</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Hasan et al., "MCP at First Glance: Studying the Security and Maintainability of MCP Servers" (preprint, v5 Apr 2026). <a href="https://arxiv.org/abs/2506.13538">https://arxiv.org/abs/2506.13538</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>"A First Look at MCP Ecosystem Security" (claimed DSN 2026): registry-scale scan, 377 vulnerable servers. <a href="https://arxiv.org/html/2510.16558">https://arxiv.org/html/2510.16558</a> <span class="tag unverified">Unverified</span></li>
+      <li>Client-side MCP threat modeling across 7 major clients (2026). <a href="https://arxiv.org/abs/2603.22489">https://arxiv.org/abs/2603.22489</a> <span class="tag unverified">Unverified</span></li>
+      <li>MCP 2026-07-28 Release Candidate — handshake and Mcp-Session-Id removed; breaking changes; validation window to Jul 28, 2026. <a href="https://blog.modelcontextprotocol.io/posts/2026-07-28-release-candidate/">blog.modelcontextprotocol.io</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Microsoft Apps on Azure Blog, "MCP Just Went Stateless — What the 2026 Spec Changes About Scaling on App Service." <a href="https://techcommunity.microsoft.com/blog/AppsonAzureBlog/mcp-just-went-stateless-%E2%80%94-what-the-2026-spec-changes-about-scaling-on-app-servic/4530222">techcommunity.microsoft.com</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>HTTP+SSE deprecated since MCP spec 2025-03-26 (Streamable HTTP); Atlassian Rovo SSE cutoff Jun 30, 2026. <a href="https://community.atlassian.com/forums/Atlassian-Remote-MCP-Server/HTTP-SSE-Deprecation-Notice/ba-p/3205484">community.atlassian.com</a> <span class="tag partial">Partial</span></li>
+      <li>MCP Authorization spec 2025-11-25 — OAuth 2.1 MUST; RFC 8707 resource indicators MUST. <a href="https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization">modelcontextprotocol.io</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Anthropic, "Donating the Model Context Protocol and establishing the Agentic AI Foundation," Dec 9, 2025. <a href="https://www.anthropic.com/news/donating-the-model-context-protocol-and-establishing-of-the-agentic-ai-foundation">anthropic.com/news</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>SEP-2207, "OIDC-Flavored Refresh Token Guidance" (Final) — major clients not requesting refresh tokens. <a href="https://modelcontextprotocol.io/seps/2207-oidc-refresh-token-guidance">modelcontextprotocol.io/seps/2207</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>UpGuard: Asana MCP cross-org exposure — flaw live May 1–Jun 4, 2025; ~1,000 customers; server offline to Jun 17. <a href="https://www.upguard.com/blog/asana-discloses-data-exposure-bug-in-mcp-server">upguard.com</a> <span class="tag partial">Partial</span></li>
+      <li>Invariant Labs, "GitHub MCP Exploited: Accessing private repositories via MCP," May 26, 2025. <a href="https://invariantlabs.ai/blog/mcp-github-vulnerability">invariantlabs.ai</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>General Analysis via Simon Willison, "Supabase MCP can leak your entire SQL database," Jul 6, 2025. <a href="https://simonwillison.net/2025/Jul/6/supabase-mcp-lethal-trifecta/">simonwillison.net</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Koi Security: rogue postmark-mcp npm package BCC'd all email (v1.0.16, Sept 2025); confirmed by Postmark. <a href="https://www.koi.ai/blog/postmark-mcp-npm-malicious-backdoor-email-theft">koi.ai</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>CVE-2025-6514 — mcp-remote 0.0.5–0.1.15 OS command injection via OAuth metadata, CVSS 9.6, 437K+ downloads (JFrog/NVD). <a href="https://nvd.nist.gov/vuln/detail/CVE-2025-6514">nvd.nist.gov</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>AWS Bedrock AgentCore Gateway — converts APIs/Lambdas into MCP-compatible tools. <a href="https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway.html">docs.aws.amazon.com</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Cloudflare, "Build and ship Remote MCP servers to Cloudflare" — workers-oauth-provider + Durable Objects, Mar 25, 2025. <a href="https://blog.cloudflare.com/remote-model-context-protocol-servers-mcp/">blog.cloudflare.com</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Anthropic Engineering, "Code execution with MCP" — 150,000 → 2,000 tokens (98.7%). <a href="https://www.anthropic.com/engineering/code-execution-with-mcp">anthropic.com/engineering</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Tim Esler (Atlassian), "MCP compression: preventing tool bloat in AI agents," Mar 29, 2026 — GitHub MCP: 94 tools ≈ 17.6k tokens; 30k+ multi-server. <a href="https://www.atlassian.com/blog/developer/mcp-compression-preventing-tool-bloat-in-ai-agents">atlassian.com/blog/developer</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Endor Labs, "Classic Vulnerabilities Meet AI Infrastructure," Jan 23, 2026 — 2,614 implementations; 82% path-traversal-prone file ops (usage, not confirmed vulns); 34% command-injection-prone APIs. <a href="https://www.endorlabs.com/learn/classic-vulnerabilities-meet-ai-infrastructure-why-mcp-needs-appsec">endorlabs.com</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Equixly, "MCP Servers: The New Security Nightmare," Mar 29, 2025 — 43% command injection; sample size undisclosed. <a href="https://equixly.com/blog/2025/03/29/mcp-server-new-security-nightmare/">equixly.com</a> <span class="tag partial">Partial</span></li>
+      <li>NVD: CVE-2025-68143 / -68144 / -68145 in mcp-server-git (Anthropic reference server), published Dec 17, 2025 — path traversal + argument injection. <a href="https://nvd.nist.gov/vuln/detail/CVE-2025-68143">nvd.nist.gov</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>OX Security, "MCP Supply Chain Advisory: RCE Vulnerabilities Across the AI Ecosystem," Apr 15, 2026 — stdio design flaw in official SDKs; ~200k vulnerable deployments is OX's companion-post estimate; Anthropic: by design. <a href="https://www.ox.security/blog/mcp-supply-chain-advisory-rce-vulnerabilities-across-the-ai-ecosystem/">ox.security</a> <span class="tag partial">Partial</span></li>
+      <li>Obsidian Security, "When MCP Meets OAuth: Common Pitfalls Leading to One-Click Account Takeover," Jan 29, 2026 — names Square (mcp.squareup.com); fixed Sep 2025. <a href="https://www.obsidiansecurity.com/blog/when-mcp-meets-oauth-common-pitfalls-leading-to-one-click-account-takeover">obsidiansecurity.com</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Chromium Blog, "The Final Countdown for NPAPI" — removed Chrome 45, Sept 2015 (security among several stated reasons). <a href="https://blog.chromium.org/2014/11/the-final-countdown-for-npapi.html">blog.chromium.org</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Eran Hammer, "OAuth 2.0 and the Road to Hell," Jul 26, 2012 (mirror; original offline). <a href="https://gist.github.com/nckroy/dd2d4dfc86f7d13045ad715377b6a48f">gist.github.com</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Google, "A second spring of cleaning" — Reader shutdown announced Mar 13, 2013; closed Jul 1, 2013. <a href="https://blog.google/inside-google/company-announcements/a-second-spring-of-cleaning/">blog.google</a> <span class="tag confirmed">Confirmed</span></li>
+      <li>Anthropic Series G: $30B at $380B post-money (Feb 2026). <a href="https://www.anthropic.com/news/anthropic-raises-30-billion-series-g-funding-380-billion-post-money-valuation">anthropic.com/news</a> <span class="tag unverified">Unverified</span></li>
+      <li>VentureBeat: Anthropic $30B annualized revenue run rate (2026). <a href="https://venturebeat.com/technology/anthropic-says-it-hit-a-30-billion-revenue-run-rate-after-crazy-80x-growth">venturebeat.com</a> <span class="tag unverified">Unverified</span></li>
+      <li>MarketsandMarkets: AI agents market $7.84B (2025) → $52.62B (2030). <a href="https://www.marketsandmarkets.com/PressReleases/ai-agents.asp">marketsandmarkets.com</a> <span class="tag unverified">Unverified</span></li>
+      <li>Salesforce Agentforce ARR and pricing models (SaaStr). <a href="https://www.saastr.com/salesforce-now-has-3-pricing-models-for-agentforce-and-maybe-right-now-thats-the-way-to-do-it/">saastr.com</a> <span class="tag unverified">Unverified</span></li>
+      <li>AWS AgentCore pricing — $0.005 per 1,000 gateway tool invocations. <a href="https://aws.amazon.com/bedrock/agentcore/pricing/">aws.amazon.com</a> <span class="tag unverified">Unverified</span></li>
+      <li>Agentic AI security startup funding landscape (2026). <a href="https://softwarestrategiesblog.com/2026/03/28/agentic-ai-security-startups-funding-mna-rsac-2026/">softwarestrategiesblog.com</a> <span class="tag unverified">Unverified</span></li>
+    </ol>
+  </section>
+
+  <p class="disclosure">
+    Panel disclosure: The five expert lenses in this briefing are author-constructed analytical perspectives, not a survey of named domain experts. Agreement across lenses is a strong working hypothesis, not independent field consensus. Citations were checked against primary sources except where tagged Unverified (the economics cluster's verification run was stopped before completion); see verification tags above.
+  </p>
+
+  <footer>Generated by the Storm Research skill · 4-phase multi-perspective pipeline</footer>
+
+</div>
+</body>
+</html>

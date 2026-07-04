@@ -1,0 +1,39 @@
+# Secure MCP Gateway — local stack (dev). Production runs air-gapped on the
+# platform described in ../MCP-Platform-Build-Plan.md; this compose is for
+# developer inner-loop only.
+services:
+  gateway:
+    build: .
+    image: mcp-gateway:latest
+    ports:
+      - "8800:8800"
+    environment:
+      # DEV secrets — replace from the secret store / HSM in staging & prod.
+      MCP_GATEWAY_KEK: "dev-kek-change-me"
+      MCP_AUDIT_KEY: "dev-audit-key-change-me"
+      MCP_VAULT_KEY: "dev-vault-key-change-me"
+    volumes:
+      - gw-data:/app/data
+      - gw-pki:/app/pki
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx,sys; sys.exit(0 if httpx.get('http://127.0.0.1:8800/api/health').json().get('status')=='ok' else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+    restart: unless-stopped
+
+  # --- Production integration stubs (uncomment + point config at them) ---
+  # keycloak:            # set gateway config auth.mode: oidc, oidc.jwks_url -> here
+  #   image: quay.io/keycloak/keycloak:26.5
+  #   command: ["start-dev"]
+  #   ports: ["8080:8080"]
+  # vllm:                # set gateway config llm.provider: openai_compat, base_url -> here
+  #   image: vllm/vllm-openai:latest
+  #   ports: ["8000:8000"]
+  # openbao:             # set gateway config vault.provider: openbao, addr -> here
+  #   image: openbao/openbao:2.5
+  #   ports: ["8200:8200"]
+
+volumes:
+  gw-data:
+  gw-pki:

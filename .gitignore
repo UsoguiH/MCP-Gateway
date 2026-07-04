@@ -1,0 +1,17 @@
+# Runtime secrets & state — regenerate on first run; never transfer
+gateway/pki/
+gateway/data/*.jsonl
+gateway/data/*.json
+gateway/data/*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db

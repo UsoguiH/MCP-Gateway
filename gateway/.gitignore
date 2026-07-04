@@ -1,0 +1,13 @@
+# Runtime secrets & state — never commit
+pki/
+data/*.jsonl
+data/*.json
+data/*.log
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+*.egg-info/
