@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import audit, auth, devclient
+from . import audit, auth, devclient, mcp_server
 from .auth import USERS, verify
 from .config import CONFIG, POLICY, ROOT
 from .controls import RateLimiter, kill_switch
@@ -97,10 +97,6 @@ class DevLoginReq(BaseModel):
     pin: str
 
 
-class ChatReq(BaseModel):
-    message: str
-
-
 class KillReq(BaseModel):
     scope: str
 
@@ -179,15 +175,42 @@ def me(claims: dict = Depends(current_user)):
             "role": claims["role"], "clearance": claims["clearance"]}
 
 
-# ---------- tools & chat ----------
+# ---------- tools (REST view for the ops console) ----------
 @app.get("/api/tools")
 def tools(claims: dict = Depends(current_user)):
     return {"tools": gw.visible_tools(claims)}
 
 
-@app.post("/api/chat")
-async def chat(req: ChatReq, claims: dict = Depends(current_user)):
-    return await gw.handle_turn(claims, req.message)
+# ---------- inbound MCP endpoint (Streamable HTTP) ----------
+# This replaces /api/chat: the gateway runs no model. Each colleague's own local
+# LLM connects here as an MCP client and drives tool calls through the pipeline.
+# Auth is the same TPM-bound, cert-constrained token used everywhere else.
+@app.post("/mcp")
+async def mcp_post(request: Request, claims: dict = Depends(current_user),
+                   mcp_session_id: str = Header(default="")):
+    try:
+        message = await request.json()
+    except Exception:
+        return JSONResponse(mcp_server.parse_error(), status_code=200)
+    if isinstance(message, list):
+        return JSONResponse(mcp_server.batch_unsupported(), status_code=200)
+    status, body, extra = await mcp_server.dispatch(gw, claims, message, mcp_session_id or None)
+    if body is None:                                   # 202 ack to a notification
+        return Response(status_code=status, headers=extra)
+    return JSONResponse(body, status_code=status, headers=extra)
+
+
+@app.get("/mcp")
+def mcp_get():
+    # We do not offer a server-initiated SSE stream, so GET is not allowed (spec).
+    return JSONResponse({"detail": "method not allowed"}, status_code=405)
+
+
+@app.delete("/mcp")
+def mcp_delete(claims: dict = Depends(current_user), mcp_session_id: str = Header(default="")):
+    if mcp_session_id:
+        mcp_server.end_session(mcp_session_id)
+    return Response(status_code=204)
 
 
 # ---------- approvals (HITL) ----------

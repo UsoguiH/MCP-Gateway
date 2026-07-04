@@ -195,10 +195,17 @@ def test_oidc_mode_validates_and_maps_keycloak_claims(monkeypatch):   # A6
 
 def test_config_validation_rejects_bad_config():    # A7
     from app.config import ConfigError, _validate
+    good_policy = {"clearance_order": ["public"], "roles": {"r": {"max_tool_tier": 0}}}
+    good_auth = {"issuer": "i", "audience": "a", "alg": "ES256"}
+    good_gw = {"host": "h", "port": 1, "max_tool_result_bytes": 1, "taint_min_len": 1}
+    # missing auth/gateway/servers entirely
     with pytest.raises(ConfigError):
-        _validate({"llm": {"provider": "mock"}}, {"clearance_order": [], "roles": {}})
+        _validate({}, good_policy)
+    # well-formed except for an empty servers list (non-empty list required)
     with pytest.raises(ConfigError):
-        _validate({"llm": {"provider": "banana"}, "auth": {"issuer": "i", "audience": "a", "alg": "ES256"},
-                   "gateway": {"host": "h", "port": 1, "max_tool_result_bytes": 1, "taint_min_len": 1},
+        _validate({"auth": good_auth, "gateway": good_gw, "servers": []}, good_policy)
+    # a policy role missing max_tool_tier is rejected
+    with pytest.raises(ConfigError):
+        _validate({"auth": good_auth, "gateway": good_gw,
                    "servers": [{"name": "n", "command": "c", "args": []}]},
-                  {"clearance_order": ["public"], "roles": {"r": {"max_tool_tier": 0}}})
+                  {"clearance_order": ["public"], "roles": {"r": {}}})

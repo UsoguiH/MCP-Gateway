@@ -1,5 +1,5 @@
 "use strict";
-const state = { token: null, thumbprint: null, user: null };
+const state = { token: null, thumbprint: null, user: null, mcpSession: null };
 
 const $ = (s) => document.querySelector(s);
 const el = (tag, cls, txt) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; return e; };
@@ -14,6 +14,34 @@ async function api(path, opts = {}) {
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(data.detail || ("HTTP " + r.status));
   return data;
+}
+
+/* ---------- inbound MCP client (Streamable HTTP) ----------
+   The gateway runs no model. This console connects to the /mcp endpoint exactly
+   as a colleague's own local-LLM MCP client would, and drives one tool call at a
+   time through the full control pipeline. */
+function mcpHeaders() {
+  const h = { "Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+              "Authorization": "Bearer " + state.token, "X-Client-Cert-Thumbprint": state.thumbprint };
+  if (state.mcpSession) h["Mcp-Session-Id"] = state.mcpSession;
+  return h;
+}
+async function mcpInitialize() {
+  const r = await fetch("/mcp", { method: "POST", headers: mcpHeaders(),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize",
+      params: { protocolVersion: "2025-11-25", capabilities: {}, clientInfo: { name: "gateway-ui", version: "1" } } }) });
+  if (!r.ok) throw new Error("MCP initialize failed (HTTP " + r.status + ")");
+  state.mcpSession = r.headers.get("Mcp-Session-Id");
+  await fetch("/mcp", { method: "POST", headers: mcpHeaders(),         // initialized notification
+    body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) });
+}
+async function mcpCall(name, args) {
+  const r = await fetch("/mcp", { method: "POST", headers: mcpHeaders(),
+    body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } }) });
+  const data = await r.json().catch(() => ({}));
+  if (data.error) throw new Error(data.error.message || ("MCP error " + r.status));
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return data.result;
 }
 
 /* ---------- login (TPM-bound certificate) ----------
@@ -42,7 +70,7 @@ $("#lang-toggle").onclick = () => {
 };
 
 $("#logout-btn").onclick = () => {
-  state.token = null; state.thumbprint = null; state.user = null;
+  state.token = null; state.thumbprint = null; state.user = null; state.mcpSession = null;
   $("#main-view").classList.add("hidden");
   $("#login-view").classList.remove("hidden");
 };
@@ -56,9 +84,10 @@ function enterApp() {
   const canApprove = ["approver", "admin"].includes(state.user.role);
   $("#tab-admin").classList.toggle("hidden", !isAdmin);
   $("#tab-approvals").classList.toggle("hidden", !canApprove);
+  state.mcpSession = null;                    // fresh MCP session on each login
   showTab("chat");
   $("#chat-log").innerHTML = "";
-  addMsg("system", `Signed in as ${state.user.name}. Role: ${state.user.role}, clearance: ${state.user.clearance.replace("_"," ")}.`);
+  addMsg("system", `Signed in as ${state.user.name}. Role: ${state.user.role}, clearance: ${state.user.clearance.replace("_"," ")}. This console calls tools straight through the MCP endpoint — the gateway runs no model.`);
   if (canApprove) pollApprovals();
 }
 
@@ -75,24 +104,42 @@ function showTab(name) {
   if (name === "admin") loadAdmin();
 }
 
-/* ---------- chat ---------- */
-$("#chat-send").onclick = sendChat;
-$("#chat-input").addEventListener("keydown", (e) => { if (e.key === "Enter") sendChat(); });
+/* ---------- console: drive one tool call through the MCP endpoint ---------- */
+$("#chat-send").onclick = sendConsole;
+$("#chat-input").addEventListener("keydown", (e) => { if (e.key === "Enter") sendConsole(); });
 
-async function sendChat() {
-  const msg = $("#chat-input").value.trim();
-  if (!msg) return;
+async function sendConsole() {
+  const raw = $("#chat-input").value.trim();
+  if (!raw) return;
   $("#chat-input").value = "";
-  addMsg("user", msg);
+  addMsg("user", raw);
+  // Accept "server.tool {json}" (the leading #call is optional, kept for muscle memory).
+  const m = raw.replace(/^#call\s+/i, "").match(/^([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s*([\s\S]*)$/);
+  if (!m) { addMsg("system", 'Format: server.tool {"arg":"value"} — e.g. docs.search_documents {"query":"security"}'); return; }
+  const server = m[1], tool = m[2], argstr = m[3].trim();
+  let args = {};
+  if (argstr) { try { args = JSON.parse(argstr); } catch (e) { addMsg("system", "Invalid JSON arguments: " + e.message); return; } }
   try {
-    const res = await api("/api/chat", { method: "POST", body: JSON.stringify({ message: msg }) });
-    if (res.assistant_text) addMsg("bot", res.assistant_text);
-    if (res.message_unicode_flags && res.message_unicode_flags.length)
-      addMsg("system", "⚠ Your message was Unicode-sanitized: " + res.message_unicode_flags.join(", "));
-    const botWrap = res.steps.length ? addMsg("bot", res.steps.length + " tool step(s):") : null;
-    res.steps.forEach((s) => botWrap.appendChild(renderStep(s)));
+    if (!state.mcpSession) await mcpInitialize();
+    const result = await mcpCall(server + "__" + tool, args);
+    renderMcpResult(server, tool, result);
   } catch (e) { addMsg("system", "Error: " + e.message); }
   if (["approver", "admin"].includes(state.user.role)) pollApprovals();
+}
+
+// Map an MCP tools/call result (+ gateway _meta) into the step card renderer.
+function renderMcpResult(server, tool, result) {
+  const g = (result && result._meta && result._meta.gateway) || {};
+  const step = {
+    server, tool,
+    status: g.status || (result.isError ? "error" : "executed"),
+    tier: g.tier, pii_masked: g.pii_masked, pii_detected: g.pii_detected,
+    taint: g.taint, approvals_required: g.approvals_required,
+    approval_id: g.approval_id, reason: g.reason,
+    result: (result.structuredContent != null) ? result.structuredContent
+            : (result.content || []).map((c) => c.text || "").join(""),
+  };
+  addMsg("bot", server + "." + tool + ":").appendChild(renderStep(step));
 }
 
 function addMsg(kind, text) {
@@ -122,7 +169,8 @@ function renderStep(s) {
   const body = el("div", "step-body");
   if (s.status === "executed") body.textContent = typeof s.result === "string" ? s.result : JSON.stringify(s.result, null, 2);
   else if (s.status === "pending_approval") {
-    body.textContent = "Awaiting human approval (tier " + s.tier + ", needs " + s.approvals_required + ").\n\n" + s.preview;
+    body.textContent = "Held for human approval — id " + (s.approval_id || "?") + ", tier " + s.tier +
+      ", needs " + s.approvals_required + " approver(s). Open the Approvals tab to release it.";
   } else body.textContent = s.reason || "";
   wrap.appendChild(body);
   return wrap;

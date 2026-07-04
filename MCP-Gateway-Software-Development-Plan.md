@@ -95,9 +95,10 @@ circuit breaker · kill switch (global/server/tool/user) · identity revocation 
 anti-hammering lockout · per-call credential injection (secret never in model/audit) ·
 protocol hardening (origin/size/schema-shaping) · registry onboarding governance.
 
-### I.4 API surface (24 API routes + `/` + favicon = 26 routes; static UI mounted separately at `/ui`)
+### I.4 API surface (26 API routes + `/` + favicon = 28 routes; static UI mounted separately at `/ui`)
 Auth (5): `/api/login/challenge`, `/api/login`, `/api/dev/login`, `/api/dev/userlist`, `/api/me`.
-Core (2): `/api/tools`, `/api/chat`. HITL (3): `/api/approvals` (+approve/reject).
+Tools/MCP (4): `/api/tools` + inbound MCP endpoint `/mcp` (POST/GET/DELETE, Streamable HTTP — the
+gateway runs no model; clients' own LLMs drive tool calls). HITL (3): `/api/approvals` (+approve/reject).
 Admin (12): killswitch (status/engage/release), **revocations**, revoke/unrevoke/unlock, audit,
 registry (+approve/approve_drift), vault. Observability (2): `/api/metrics`, `/api/health`.
 

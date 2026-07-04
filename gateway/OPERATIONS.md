@@ -8,7 +8,7 @@ completion status: `GATEWAY-COMPLETION-PLAN.md`.
 
 ```bash
 pip install -r requirements.txt
-# dev (mock LLM, builtin TPM+PIN auth, dev PKI auto-generated)
+# dev (no model — clients drive tools via POST /mcp; builtin TPM+PIN auth, dev PKI auto-generated)
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8800
 # container
 docker build -t mcp-gateway . && docker run -p 8800:8800 \
@@ -24,7 +24,8 @@ docker build -t mcp-gateway . && docker run -p 8800:8800 \
 | `MCP_VAULT_KEY` | dynamic credential derivation | OpenBao |
 
 ## 3. Config (`config.yaml`) — validated on startup, fails fast
-- `llm.provider`: `mock` → `openai_compat` (point `base_url` at vLLM) when GPUs land.
+- No `llm.*` block: the gateway runs no model. Each colleague's own LLM connects to the
+  inbound MCP endpoint (`POST /mcp`, Streamable HTTP) and drives tool calls through the pipeline.
 - `auth.mode`: `builtin` (TPM+PIN, dev) → `oidc` (validate Keycloak JWTs via `auth.oidc.jwks_url`).
 - `registry.require_approval`: set **true** in production (Risk-Board gates new tools).
 - `audit.siem_export`: mirror events to the SIEM feed (`data/siem_stream.jsonl` → Wazuh/OpenSearch).
@@ -59,6 +60,7 @@ docker build -t mcp-gateway . && docker run -p 8800:8800 \
    read → exfil attempt via the actions server).
 
 ## 7. Production readiness — operator-provided (see `GATEWAY-COMPLETION-PLAN.md` §B)
-Real vLLM+GPU; HSM + workstation TPM; Keycloak host (`auth.mode: oidc`); TLS 1.3 + mTLS terminator
+Client LLM hosts + a brokered confidential-compute GPU (inference is client-side, off the gateway);
+HSM + workstation TPM; Keycloak host (`auth.mode: oidc`); TLS 1.3 + mTLS terminator
 + SPIFFE; SIEM product; DR site + offline backups; air-gap network + admission control; Arabic NER
 model. The gateway software is complete and seams are ready for each.

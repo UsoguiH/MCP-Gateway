@@ -14,7 +14,7 @@
 ## Current status (already built + verified, 60 tests green)
 Auth (TPM+PIN cert, hardened, pentested), ABAC/authz, taint tracking, DLP (Saudi ID/Iqama/IBAN),
 tool registry + hash-pinning/rug-pull, HITL tiers + SoD, kill switch, Unicode guard,
-HMAC-chained audit, MCP stdio manager, mock+openai_compat LLM adapter, 2 reference servers, UI.
+HMAC-chained audit, MCP stdio manager, inbound MCP endpoint (POST /mcp), 2 reference servers, UI.
 
 ## §A — Software to complete (build now, in order)
 
@@ -35,7 +35,8 @@ HMAC-chained audit, MCP stdio manager, mock+openai_compat LLM adapter, 2 referen
 | A13 | **Test coverage** — every A-item tested; suite stays 100% green | full suite green | pytest |
 
 ## §B — Operator-provided infrastructure (seams ready, documented, NOT buildable here)
-Real vLLM+GPU (swap `llm.provider: openai_compat`); HSM + workstation TPM (swap `MCP_GATEWAY_KEK`
+Client-side LLM hosts + a brokered confidential-compute GPU (inference runs off the gateway, which
+connects clients via the inbound MCP endpoint); HSM + workstation TPM (swap `MCP_GATEWAY_KEK`
 → HSM, PKI → OpenBao/step-ca); Keycloak host (swap `auth.mode: oidc`); TLS 1.3 + mTLS terminator
 + SPIFFE (south/north transport); SIEM product (point A9 sink at it); DR site + offline backups;
 air-gap network + admission control; Arabic NER model (DLP third detector); confidential computing.

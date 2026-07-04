@@ -24,9 +24,8 @@ def _require(obj: dict, path: str, typ=None):
 
 
 def _validate(config: dict, policy: dict):
-    _require(config, "llm.provider", str)
-    if config["llm"]["provider"] not in ("mock", "openai_compat"):
-        raise ConfigError("llm.provider must be 'mock' or 'openai_compat'")
+    # No llm.* block: inference is client-side now (each colleague's local LLM
+    # connects to the inbound MCP endpoint). The gateway runs no model.
     _require(config, "auth.mode", str) if "mode" in config.get("auth", {}) else None
     for k in ("auth.issuer", "auth.audience", "auth.alg"):
         _require(config, k, str)

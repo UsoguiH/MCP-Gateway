@@ -39,7 +39,7 @@
     <header class="topbar">
       <div class="brand">Secure MCP Gateway</div>
       <nav class="tabs">
-        <button class="tab active" data-tab="chat">Chat</button>
+        <button class="tab active" data-tab="chat">Console</button>
         <button class="tab" data-tab="tools">Tools</button>
         <button class="tab" data-tab="approvals" id="tab-approvals">Approvals <span id="appr-badge" class="badge hidden">0</span></button>
         <button class="tab" data-tab="admin" id="tab-admin">Admin</button>
@@ -51,12 +51,12 @@
       </div>
     </header>
 
-    <!-- Chat -->
+    <!-- Console: direct MCP tool calls (the gateway runs no model) -->
     <div class="tabpanel" id="panel-chat">
       <div id="chat-log" class="chat-log"></div>
       <div class="composer">
-        <input id="chat-input" placeholder="Try: search security · read document 5 · list records · #call actions.delete_record {&quot;record_id&quot;:&quot;7&quot;}">
-        <button id="chat-send">Send</button>
+        <input id="chat-input" placeholder="server.tool {json} — e.g. docs.search_documents {&quot;query&quot;:&quot;security&quot;} · actions.list_records · actions.delete_record {&quot;record_id&quot;:&quot;7&quot;}">
+        <button id="chat-send">Call</button>
       </div>
     </div>
 

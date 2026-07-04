@@ -14,8 +14,9 @@ This is where every control composes on the path of a single tool call:
  10. Unicode + DLP on result-> mask Saudi PII, record taint (§4.8/§4.5)
  11. audit every step       -> hash-chained WORM (§4.9)
 
-The planner (LLM) only proposes calls; the gateway disposes. Secrets are never
-in model context (this dev build injects none; the seam is here for vault use).
+The planner is the *client's* local LLM (it connects via the inbound MCP endpoint
+in mcp_server.py); it only proposes calls, the gateway disposes. Secrets are never
+in model context — the vault injects per-call backend credentials at dispatch.
 """
 import json
 import time
@@ -24,7 +25,6 @@ from . import audit, authz, classification, dlp, unicode_guard
 from .approvals import ApprovalStore
 from .config import GATEWAY, clearance_rank
 from .controls import kill_switch, rate_limiter, server_limiter, tool_limiter
-from .llm import LLMClient
 from .mcp_manager import MCPManager
 from .registry import Registry
 from .taint import TaintStore
@@ -41,7 +41,6 @@ class Gateway:
         self.registry = Registry()
         self.approvals = ApprovalStore()
         self.taint = TaintStore(GATEWAY["taint_min_len"])
-        self.llm = LLMClient()
         self.started = False
         # circuit breaker: per-server consecutive-failure tracking -> auto-open
         self._breaker: dict[str, dict] = {}
@@ -87,23 +86,12 @@ class Gateway:
             out.append({**_strip_injected(t), "tier": entry["tier"]})
         return out
 
-    # ---- main entry: a user turn ----
-    async def handle_turn(self, claims: dict, message: str) -> dict:
-        session = claims["sub"]
-        clean_msg, msg_flags = unicode_guard.sanitize(message)
-        tools = self.visible_tools(claims)
-        plan = await self.llm.plan(clean_msg, tools)
-
-        steps = []
-        for call in plan.get("tool_calls", []):
-            step = await self._execute_call(claims, session, call)
-            steps.append(step)
-
-        return {
-            "assistant_text": plan.get("text", ""),
-            "message_unicode_flags": msg_flags,
-            "steps": steps,
-        }
+    # ---- main entry: one tool call proposed by the client's LLM (MCP tools/call) ----
+    async def call_tool(self, claims: dict, server: str, tool: str, arguments: dict) -> dict:
+        """Execute a single named tool call through every control and return the
+        step dict. Taint is keyed to the caller's subject (per-user session)."""
+        return await self._execute_call(
+            claims, claims["sub"], {"server": server, "tool": tool, "arguments": arguments})
 
     # ---- a single proposed tool call goes through every control ----
     async def _execute_call(self, claims: dict, session: str, call: dict) -> dict:

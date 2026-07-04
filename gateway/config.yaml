@@ -2,11 +2,10 @@
 # Maps to MCP-Secure-Architecture-v10-Final-BuildSpec.md (§4.4).
 # PRODUCTION SWAP POINTS are marked; nothing else changes when they are swapped.
 
-llm:
-  # "mock" needs no GPU. When GPUs arrive: provider: openai_compat + base_url of vLLM.
-  provider: mock                 # mock | openai_compat
-  base_url: "http://localhost:8000/v1"   # vLLM OpenAI-compatible endpoint (unused in mock mode)
-  model: "qwen3.5"               # model name at the serving layer (unused in mock mode)
+# NOTE: the gateway runs NO model. Inference is client-side — each colleague's own
+# local LLM (or a brokered confidential-compute GPU) connects to the inbound MCP
+# endpoint (POST /mcp) and drives tools through the control pipeline. There is no
+# llm.* block: the gateway is a pure Policy Enforcement Point / MCP router.
 
 auth:
   # TPM-bound certificate authentication (redesign plan §1-3). No shared secret,
