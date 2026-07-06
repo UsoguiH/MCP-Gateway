@@ -147,5 +147,14 @@ feedback:** a closed pilot with a handful of users can run right after Phase 1, 
    read-only against a local folder/SMB path with path allow-lists; widen deliberately.
 2. **Wire the DB + Git connectors to real systems** — least-privilege service accounts, onboard
    each via the registry gate. (Blocked in part by the [P0–1] and [P1] decisions above.)
-3. **Single-user local-AI smoke test** — connect one real MCP client (employee zero) through
-   login → token → `/mcp` → tool call → approval hold, as the bridge toward the Phase 4 pilot.
+3. **Client access layer (pulled forward from Phase 4 — build right after the docs connector).**
+   The pilot depends on easy onboarding, so this comes before Phase 2:
+   - **MCP OAuth 2.1 authorization endpoints** on the gateway (~2–4 days): spec-compliant
+     clients (Claude Code and any local-AI host implementing MCP auth) get the
+     "add URL → browser opens our password+MFA login → token handled automatically" flow.
+     Security model unchanged — the OAuth pages front the existing login.
+   - **"Connect your AI" self-service page** in the gateway UI (~1 day): for clients that
+     only take a static token — generates the personal MCP config, copy/paste, live
+     "connected" indicator (we already track live MCP sessions).
+   - **Employee-zero smoke test**: one real local AI onboarded through that exact flow —
+     login → token → `/mcp` → tool call → DLP mask → approval hold — before anyone else.
