@@ -151,19 +151,29 @@ feedback:** a closed pilot with a handful of users can run right after Phase 1, 
 - **Phase 5 — Harden & certify (M).** Independent pen test; DR site; HSM for keys if required;
   formal risk acceptance + compliance mapping. → _Outcome: production sign-off._
 
-## Do now (Phase 0 ✅ + Phase 1 ✅ done — next: client access layer)
+## Do now (Phase 0 ✅ + Phase 1 ✅ + client access layer ✅ — next: Phase 2 scale)
 
-1. **Approve the files-mcp tools in the admin console** (they sit `pending` per governance),
-   then spot-check a `files__search_content` call end-to-end through `/mcp`.
-2. **Swap the Gitea token for a dedicated machine account + scoped token** (least privilege).
-3. **Client access layer (pulled forward from Phase 4 — build right after the docs connector).**
-   The pilot depends on easy onboarding, so this comes before Phase 2:
-   - **MCP OAuth 2.1 authorization endpoints** on the gateway (~2–4 days): spec-compliant
-     clients (Claude Code and any local-AI host implementing MCP auth) get the
-     "add URL → browser opens our password+MFA login → token handled automatically" flow.
-     Security model unchanged — the OAuth pages front the existing login.
-   - **"Connect your AI" self-service page** in the gateway UI (~1 day): for clients that
-     only take a static token — generates the personal MCP config, copy/paste, live
-     "connected" indicator (we already track live MCP sessions).
-   - **Employee-zero smoke test**: one real local AI onboarded through that exact flow —
-     login → token → `/mcp` → tool call → DLP mask → approval hold — before anyone else.
+1. **Employee-zero smoke test** — on a real client machine, add the gateway to an
+   OAuth-capable MCP client (e.g. `claude mcp add --transport http company-gateway
+   https://gateway.internal:8443/mcp`), sign in with a live authenticator, and run a
+   `files__search_content` call end-to-end (login → OAuth → `/mcp` → DLP mask → approval).
+2. **Approve the files-mcp tools in the admin console** (they sit `pending` per governance).
+3. **Swap the Gitea token for a dedicated machine account + scoped token** (least privilege).
+4. **Begin Phase 2** — move gateway state (audit/approvals/sessions) into the DB, then HA.
+3. **Client access layer (✅ DONE 2026-07-06).** Pulled forward from Phase 4 so the pilot
+   has easy onboarding.
+   - **MCP OAuth 2.1 authorization endpoints** — `app/oauth.py` + `/.well-known/*`,
+     `/oauth/register` (DCR), `/oauth/authorize` (login+consent page = the existing
+     password+MFA login), `/oauth/token` (code+PKCE S256 exchange, rotated refresh).
+     `/mcp` now accepts EITHER a cert-bound console session token OR an OAuth bearer, and
+     a 401 advertises `WWW-Authenticate: resource_metadata=...` so compliant clients
+     (Claude Code, etc.) self-onboard. OAuth access tokens are bearer (not cert-bound):
+     protected by PKCE + short TTL + rotated refresh + revocation over the mTLS channel.
+   - **"Connect your AI" page** — `ui/connect.html` at `/connect`: sign in, choose
+     Automatic (OAuth) or Manual token, copy the generated MCP config, live "connected"
+     indicator (`/api/connect/status`, `/api/connect/token`).
+   - **Verified 2026-07-06:** 14 new tests (`tests/test_oauth.py`), full suite **135 passed**;
+     through the live mTLS proxy — metadata advertises the correct external URL
+     (nginx now forwards Host), 401 discovery hint present, and an OAuth bearer token
+     drives a real `tools/list` with no cert header. Employee-zero smoke test remains as
+     the last step (needs a real enrolled authenticator on a client machine).

@@ -60,6 +60,17 @@ auth:
     header: "x-proxy-auth"
     shared_secret: ""            # prefer MCP_PROXY_SHARED_SECRET_FILE (Docker secret)
 
+  # OAuth 2.1 authorization server for MCP clients (app/oauth.py). Fronts the
+  # password+MFA login with the standard authorization-code + PKCE flow so any
+  # spec-compliant local-AI client (Claude Code, etc.) self-onboards like it does
+  # for any hosted MCP server. Access tokens here are bearer (not cert-bound) and
+  # rely on PKCE + short TTL + rotated refresh + revocation over the mTLS channel.
+  oauth:
+    access_ttl_seconds: 3600            # OAuth access token lifetime (refresh renews)
+    refresh_ttl_seconds: 2592000        # refresh token lifetime (30 days), rotated per use
+    code_ttl_seconds: 60                # authorization code validity (single-use)
+    manual_token_ttl_seconds: 28800     # "Connect your AI" manual paste-in token (8h)
+
 gateway:
   host: "127.0.0.1"
   port: 8800

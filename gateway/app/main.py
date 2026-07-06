@@ -4,11 +4,12 @@ import os
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                               RedirectResponse, Response)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import audit, auth, devclient, mcp_server
+from . import audit, auth, devclient, mcp_server, oauth
 from .auth import USERS, verify
 from .config import CONFIG, POLICY, ROOT
 from .controls import RateLimiter, kill_switch
@@ -125,6 +126,36 @@ def fresh_password(claims: dict = Depends(current_user)) -> dict:
     return claims
 
 
+def _base_url(request: Request) -> str:
+    """External base URL as the client sees it (honors the mTLS terminator's
+    X-Forwarded-* so OAuth metadata advertises https://gateway:8443, not loopback)."""
+    proto = request.headers.get("x-forwarded-proto") or request.url.scheme
+    host = request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}"
+
+
+def mcp_principal(request: Request, authorization: str = Header(default=""),
+                  x_client_cert_thumbprint: str = Header(default="")) -> dict:
+    """Auth for /mcp — accepts EITHER a cert-bound console session token OR an OAuth
+    2.1 access token (local-AI clients). On failure, advertise the OAuth resource
+    metadata per the MCP authorization spec so a compliant client self-onboards."""
+    challenge = (f'Bearer resource_metadata='
+                 f'"{_base_url(request)}/.well-known/oauth-protected-resource"')
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(401, "authorization required",
+                            headers={"WWW-Authenticate": challenge})
+    token = authorization[7:]
+    claims = verify(token, x_client_cert_thumbprint or None)     # cert-bound session
+    if not claims:
+        claims = auth.verify_oauth_access(token)                 # OAuth bearer
+    if not claims:
+        raise HTTPException(401, "invalid, expired, or revoked token",
+                            headers={"WWW-Authenticate": challenge})
+    if auth.password_change_required(claims["sub"]):
+        raise HTTPException(403, "password change required — rotate via /api/auth/password")
+    return claims
+
+
 def claims_for(username: str) -> dict:
     u = USERS[username]
     return {"sub": username, "name": u["name"], "role": u["role"], "clearance": u["clearance"]}
@@ -172,6 +203,11 @@ class ChangePwReq(BaseModel):
 
 class RevokeReq(BaseModel):
     sub: str
+
+
+class ConnectTokenReq(BaseModel):
+    # optional label so a user can name the client they're pasting the token into
+    label: str = ""
 
 
 def _user_view(claims: dict) -> dict:
@@ -371,7 +407,7 @@ def tools(claims: dict = Depends(current_user)):
 # LLM connects here as an MCP client and drives tool calls through the pipeline.
 # Auth is the same TPM-bound, cert-constrained token used everywhere else.
 @app.post("/mcp")
-async def mcp_post(request: Request, claims: dict = Depends(fresh_password),
+async def mcp_post(request: Request, claims: dict = Depends(mcp_principal),
                    mcp_session_id: str = Header(default="")):
     try:
         message = await request.json()
@@ -396,6 +432,232 @@ def mcp_delete(claims: dict = Depends(current_user), mcp_session_id: str = Heade
     if mcp_session_id:
         mcp_server.end_session(mcp_session_id)
     return Response(status_code=204)
+
+
+# ---------- OAuth 2.1 authorization server (MCP client onboarding) ----------
+# Fronts the existing password+MFA login with the standard auth-code + PKCE flow,
+# so a spec-compliant local-AI client (Claude Code, etc.) self-onboards: it reads
+# the metadata below, registers, opens /oauth/authorize in a browser where the
+# colleague logs in, then exchanges the code for a bearer token at /oauth/token.
+def _oauth_error(err: oauth.OAuthError) -> JSONResponse:
+    return JSONResponse({"error": err.error, "error_description": err.description},
+                        status_code=err.status)
+
+
+@app.get("/.well-known/oauth-protected-resource")
+@app.get("/.well-known/oauth-protected-resource/mcp")
+def oauth_protected_resource(request: Request):
+    return oauth.protected_resource_metadata(_base_url(request))
+
+
+@app.get("/.well-known/oauth-authorization-server")
+@app.get("/.well-known/oauth-authorization-server/mcp")
+def oauth_authorization_server(request: Request):
+    return oauth.authorization_server_metadata(_base_url(request))
+
+
+@app.post("/oauth/register")
+async def oauth_register(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_client_metadata",
+                             "error_description": "body must be JSON"}, status_code=400)
+    try:
+        return JSONResponse(oauth.register_client(payload), status_code=201)
+    except oauth.OAuthError as e:
+        return _oauth_error(e)
+
+
+def _authorize_page(params: dict, error: str = "") -> HTMLResponse:
+    """Self-contained login + consent page served for GET/failed POST of /authorize.
+    The page IS the gateway's password+MFA login; on success it 302s back with a code."""
+    import html as _html
+    hidden = "".join(
+        f'<input type="hidden" name="{k}" value="{_html.escape(v)}">'
+        for k, v in params.items() if v)
+    client = oauth.get_client(params.get("client_id", ""))
+    client_name = _html.escape(client.get("client_name") or "an AI client") if client else "an AI client"
+    err_html = f'<p class="err">{_html.escape(error)}</p>' if error else ""
+    mfa_field = (
+        '<label>Authenticator code (MFA)'
+        '<input name="otp" inputmode="numeric" autocomplete="one-time-code" '
+        'pattern="[0-9]*" placeholder="123456"></label>'
+        if CONFIG["auth"].get("require_mfa", False) else "")
+    return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Authorize AI access</title>
+<style>
+:root{{color-scheme:light dark}}
+*{{box-sizing:border-box}}
+body{{margin:0;min-height:100vh;display:grid;place-items:center;
+ font-family:"Segoe UI",system-ui,sans-serif;background:#0f1720;color:#e8ecf0}}
+.card{{width:min(400px,92vw);background:#1a2330;border:1px solid #2a3644;border-radius:16px;
+ padding:32px 30px;box-shadow:0 12px 40px rgba(0,0,0,.4)}}
+h1{{font-size:19px;margin:0 0 4px}}
+.sub{{color:#9fb0c0;font-size:13.5px;margin:0 0 22px;line-height:1.5}}
+.sub b{{color:#e8ecf0}}
+label{{display:block;font-size:12.5px;color:#9fb0c0;margin:14px 0 0;font-weight:600}}
+input{{width:100%;margin-top:6px;padding:11px 13px;font-size:15px;border-radius:9px;
+ border:1px solid #33414f;background:#0f1720;color:#e8ecf0}}
+input:focus{{outline:2px solid #2f81f7;border-color:#2f81f7}}
+button{{width:100%;margin-top:22px;padding:12px;font-size:15px;font-weight:600;border:0;
+ border-radius:9px;background:#2f81f7;color:#fff;cursor:pointer}}
+button:hover{{background:#2a72db}}
+.err{{background:#3a1720;border:1px solid #6b2434;color:#ffb3bf;padding:10px 12px;
+ border-radius:9px;font-size:13px;margin:0 0 12px}}
+.lock{{font-size:26px;text-align:center;margin-bottom:6px}}
+.foot{{margin-top:18px;font-size:11.5px;color:#6b7c8c;text-align:center;line-height:1.5}}
+</style></head><body><form class="card" method="post" action="/oauth/authorize">
+<div class="lock">🔐</div>
+<h1>Authorize AI access</h1>
+<p class="sub"><b>{client_name}</b> wants to access internal systems <b>as you</b>, through the
+secure gateway. Sign in to approve — every tool call it makes will still be checked,
+masked and audited under your name.</p>
+{err_html}
+{hidden}
+<label>Username<input name="username" autocomplete="username" autofocus required></label>
+<label>Password<input name="password" type="password" autocomplete="current-password" required></label>
+{mfa_field}
+<button type="submit">Sign in &amp; authorize</button>
+<p class="foot">You are approving access for your own account only. Close this tab to cancel.</p>
+</form></body></html>""")
+
+
+_AUTHZ_PARAM_KEYS = ("response_type", "client_id", "redirect_uri", "code_challenge",
+                     "code_challenge_method", "state", "scope")
+
+
+def _validate_authorize(p: dict) -> tuple[dict, str]:
+    """Shared validation for GET render + POST submit. Returns (client, redirect_uri)
+    or raises OAuthError for problems we must NOT redirect (bad client/redirect)."""
+    client = oauth.get_client(p.get("client_id", ""))
+    if not client:
+        raise oauth.OAuthError("invalid_client", "unknown client_id; register first", status=400)
+    redirect_uri = p.get("redirect_uri", "")
+    if not redirect_uri or not oauth.redirect_uri_allowed(client, redirect_uri):
+        raise oauth.OAuthError("invalid_request", "redirect_uri not registered for this client",
+                               status=400)
+    return client, redirect_uri
+
+
+@app.get("/oauth/authorize")
+def oauth_authorize_get(request: Request):
+    p = {k: request.query_params.get(k, "") for k in _AUTHZ_PARAM_KEYS}
+    try:
+        _validate_authorize(p)
+    except oauth.OAuthError as e:
+        return _oauth_error(e)                 # safe: don't redirect to an unvetted URI
+    if p.get("response_type") != "code":
+        return _redirect_error(p, "unsupported_response_type", "only response_type=code")
+    if p.get("code_challenge_method", "S256") != "S256" or not p.get("code_challenge"):
+        return _redirect_error(p, "invalid_request", "PKCE S256 code_challenge required")
+    return _authorize_page(p)
+
+
+def _redirect_error(p: dict, error: str, desc: str) -> Response:
+    from urllib.parse import urlencode
+    q = {"error": error, "error_description": desc}
+    if p.get("state"):
+        q["state"] = p["state"]
+    return RedirectResponse(f"{p['redirect_uri']}?{urlencode(q)}", status_code=302)
+
+
+@app.post("/oauth/authorize")
+async def oauth_authorize_post(request: Request):
+    form = await request.form()
+    p = {k: str(form.get(k, "")) for k in _AUTHZ_PARAM_KEYS}
+    try:
+        _validate_authorize(p)
+    except oauth.OAuthError as e:
+        return _oauth_error(e)
+    username = str(form.get("username", "")).strip()
+    password = str(form.get("password", ""))
+    otp = str(form.get("otp", "")).strip()
+    # Layer 1: password. Layer 2: TOTP when MFA is enforced. Reuses the same
+    # verification + lockout machinery as the console login.
+    ok = False
+    if not auth.locked(username) and auth.verify_password_layer(username, password):
+        if CONFIG["auth"].get("require_mfa", False):
+            ok = auth.verify_totp(username, otp)
+        else:
+            ok = True
+    if not ok:
+        auth.note_failure(username)
+        audit.record("oauth_authorize_failed", user=username or "unknown")
+        return _authorize_page(p, error="Sign-in failed. Check your username, password"
+                               + (" and authenticator code." if CONFIG["auth"].get("require_mfa") else "."))
+    auth.clear_failures(username)
+    code = oauth.create_authorization_code(
+        p["client_id"], p["redirect_uri"], p["code_challenge"], username,
+        p.get("scope") or "mcp")
+    audit.record("oauth_authorized", user=username, client_id=p["client_id"])
+    from urllib.parse import urlencode
+    q = {"code": code}
+    if p.get("state"):
+        q["state"] = p["state"]
+    return RedirectResponse(f"{p['redirect_uri']}?{urlencode(q)}", status_code=302)
+
+
+@app.post("/oauth/token")
+async def oauth_token(request: Request):
+    form = await request.form()
+    grant = str(form.get("grant_type", ""))
+    try:
+        if grant == "authorization_code":
+            body = oauth.exchange_code(
+                str(form.get("code", "")), str(form.get("client_id", "")),
+                str(form.get("redirect_uri", "")), str(form.get("code_verifier", "")))
+            audit.record("oauth_token_issued", client_id=str(form.get("client_id", "")),
+                         grant="authorization_code")
+        elif grant == "refresh_token":
+            body = oauth.refresh_access(
+                str(form.get("refresh_token", "")), str(form.get("client_id", "")))
+            audit.record("oauth_token_refreshed", client_id=str(form.get("client_id", "")))
+        else:
+            return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
+    except oauth.OAuthError as e:
+        return _oauth_error(e)
+    return JSONResponse(body, headers={"Cache-Control": "no-store"})
+
+
+# ---------- "Connect your AI" self-service page ----------
+@app.get("/connect")
+def connect_page():
+    return FileResponse(str(UI_DIR / "connect.html"),
+                        headers={"Cache-Control": "no-cache, must-revalidate"})
+
+
+@app.post("/api/connect/token")
+def connect_token(req: ConnectTokenReq, request: Request, claims: dict = Depends(fresh_password)):
+    """Mint a paste-in connection token for MCP clients that take a static bearer
+    (no OAuth support). Longer-lived than a console session but bounded, revocable,
+    and attributed to this user. OAuth (auto-refresh) is preferred where supported."""
+    ttl = int(CONFIG["auth"].get("oauth", {}).get("manual_token_ttl_seconds", 28800))
+    token, expires_in, jti = auth.mint_oauth_access(claims["sub"], scope="mcp", ttl=ttl)
+    audit.record("connect_token_issued", user=claims["sub"], jti=jti,
+                 label=req.label[:60], expires_in=expires_in)
+    return {
+        "access_token": token,
+        "expires_in": expires_in,
+        "mcp_url": f"{_base_url(request)}/mcp",
+        "config": {
+            "mcpServers": {
+                "company-gateway": {
+                    "type": "http",
+                    "url": f"{_base_url(request)}/mcp",
+                    "headers": {"Authorization": f"Bearer {token}"},
+                }
+            }
+        },
+    }
+
+
+@app.get("/api/connect/status")
+def connect_status(claims: dict = Depends(current_user)):
+    """Whether this user currently has a live MCP client session connected."""
+    live = [s for s in mcp_server.sessions_list() if s["sub"] == claims["sub"]]
+    return {"connected": bool(live), "sessions": len(live),
+            "mcp_url_path": "/mcp", "user": claims["sub"]}
 
 
 # ---------- approvals (HITL) ----------

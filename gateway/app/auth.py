@@ -626,6 +626,64 @@ def _verify_builtin(token: str, cert_thumbprint: str | None) -> dict | None:
     return claims
 
 
+# ---------- OAuth 2.1 access tokens (MCP client authorization) ----------
+# These are the tokens issued to a colleague's local-AI MCP client through the
+# OAuth authorization-code flow (app/oauth.py). Unlike the interactive session
+# token above, an OAuth access token is NOT cert-thumbprint bound: a standard MCP
+# client (e.g. Claude Code) sends only `Authorization: Bearer`. Its protection is
+# the OAuth model — PKCE at issuance, short TTL, rotated refresh tokens, per-jti
+# revocability, subject revocation — over the mTLS transport that already binds the
+# channel to an enrolled device. Marked `token_use:"mcp_access"` so it can never be
+# confused with (or substituted for) a cert-bound console session token.
+_OAUTH_ACCESS_TTL = int((_A.get("oauth", {}) or {}).get("access_ttl_seconds", 3600))
+_revoked_token_jti: dict[str, float] = {}       # jti -> exp, explicit access-token kill
+
+
+def mint_oauth_access(sub: str, scope: str = "mcp", ttl: int | None = None) -> tuple[str, int, str]:
+    """Mint a signed OAuth access token for `sub`. Returns (jwt, expires_in, jti)."""
+    if sub not in USERS:
+        raise ValueError("unknown subject")
+    u = USERS[sub]
+    now = int(time.time())
+    ttl = int(ttl or _OAUTH_ACCESS_TTL)
+    jti = uuid.uuid4().hex
+    claims = {
+        "iss": _ISSUER, "aud": _AUDIENCE, "sub": sub,
+        "name": u["name"], "role": u["role"], "clearance": u["clearance"],
+        "iat": now, "nbf": now, "exp": now + ttl, "auth_time": now,
+        "jti": jti, "amr": ["pwd", "otp"] if _REQUIRE_MFA else ["pwd"],
+        "acr": "aal2" if _REQUIRE_MFA else "aal1",
+        "token_use": "mcp_access", "scope": scope,
+    }
+    return jwt.encode(claims, pki.signing_key(), algorithm=_ALG), ttl, jti
+
+
+def verify_oauth_access(token: str) -> dict | None:
+    """Validate an OAuth access token (no cert binding). Rejects cert-bound session
+    tokens (they carry `cnf`, not `token_use:mcp_access`) and vice-versa."""
+    try:
+        claims = jwt.decode(
+            token, pki.signing_public_pem(), algorithms=[_ALG],
+            issuer=_ISSUER, audience=_AUDIENCE, leeway=_LEEWAY,
+            options={"require": ["exp", "iat", "nbf", "iss", "aud", "sub", "jti"]},
+        )
+    except jwt.PyJWTError:
+        return None
+    if claims.get("token_use") != "mcp_access":
+        return None
+    if claims["sub"] in _revoked_subjects:
+        return None
+    if claims["jti"] in _revoked_token_jti:
+        return None
+    return claims
+
+
+def revoke_oauth_jti(jti: str, exp: float):
+    with _lock:
+        _gc(_revoked_token_jti)
+        _revoked_token_jti[jti] = exp
+
+
 def step_up_satisfied(claims: dict, max_age: int = _STEP_UP_MAX_AGE) -> bool:
     """True if the caller authenticated recently enough for a high-risk action."""
     return (int(time.time()) - int(claims.get("auth_time", 0))) <= max_age
