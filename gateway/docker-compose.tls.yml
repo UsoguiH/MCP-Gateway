@@ -1,0 +1,48 @@
+# Production-shaped stack: the gateway is NEVER published directly — only the
+# mTLS-terminating nginx proxy is exposed. Run:
+#
+#   ./deploy/gen_tls_certs.sh                       # dev CA + server + client certs
+#   echo -n "$(openssl rand -hex 32)" > deploy/proxy_secret            # shared secret
+#   docker compose -f docker-compose.yml -f docker-compose.tls.yml up --build
+#
+# Then reach the gateway ONLY via https://localhost:8443 presenting the client cert:
+#   curl --cacert deploy/tls/ca.crt --cert deploy/tls/client.crt \
+#        --key deploy/tls/client.key https://localhost:8443/api/health
+#
+# A direct request to the gateway (bypassing nginx) is refused by trusted_proxy.
+services:
+  gateway:
+    # Remove the public port mapping from the base compose — internal only.
+    ports: !reset []
+    environment:
+      MCP_ENV: "production"                     # turn config tripwires into hard errors
+      MCP_PROXY_SHARED_SECRET_FILE: "/run/secrets/proxy_secret"
+      # supply real MCP_GATEWAY_KEK_FILE / MCP_AUDIT_KEY_FILE / MCP_VAULT_KEY_FILE too
+    secrets:
+      - proxy_secret
+    expose:
+      - "8800"
+
+  proxy:
+    image: nginx:1.27
+    depends_on:
+      - gateway
+    ports:
+      - "8443:8443"     # HTTPS + mTLS — the only exposed port
+      - "8080:8080"     # redirects to HTTPS
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro
+      - ./deploy/tls:/etc/nginx/tls:ro
+    environment:
+      MCP_PROXY_SHARED_SECRET_FILE: "/run/secrets/proxy_secret"
+    secrets:
+      - proxy_secret
+    # Render the shared secret into the config, then start nginx.
+    command: >
+      /bin/sh -c "export MCP_PROXY_SHARED_SECRET=$$(cat /run/secrets/proxy_secret);
+      envsubst '$$MCP_PROXY_SHARED_SECRET' < /etc/nginx/templates/nginx.conf.template
+      > /etc/nginx/nginx.conf; exec nginx -g 'daemon off;'"
+
+secrets:
+  proxy_secret:
+    file: ./deploy/proxy_secret

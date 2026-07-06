@@ -21,7 +21,8 @@ def sign_challenge(key: ec.EllipticCurvePrivateKey, nonce: str) -> bytes:
     return key.sign(nonce.encode(), ec.ECDSA(hashes.SHA256()))
 
 
-def obtain_token(username: str, pin: str | None = None) -> tuple[str, str] | None:
+def obtain_token(username: str, pin: str | None = None,
+                 amr_extra: list | None = None) -> tuple[str, str] | None:
     """Full two-factor challenge/response for a demo user.
 
     Requires the PIN to unlock the key (second factor). A wrong PIN fails to
@@ -40,7 +41,7 @@ def obtain_token(username: str, pin: str | None = None) -> tuple[str, str] | Non
     if not challenge:
         return None
     sig = sign_challenge(key, challenge["nonce"])
-    token = auth.authenticate(cert_pem, challenge["nonce"], sig)
+    token = auth.authenticate(cert_pem, challenge["nonce"], sig, amr_extra=amr_extra)
     if not token:
         return None
     return token, challenge["thumbprint"]

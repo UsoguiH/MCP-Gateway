@@ -43,7 +43,8 @@ _AUDIT_KEY_FILE = ROOT / "pki" / "audit_hmac.key"
 
 
 def _audit_key() -> bytes:
-    env = os.environ.get("MCP_AUDIT_KEY")
+    from .config import secret
+    env = secret("MCP_AUDIT_KEY")               # supports MCP_AUDIT_KEY_FILE
     if env:
         return env.encode("utf-8")
     if not _AUDIT_KEY_FILE.exists():

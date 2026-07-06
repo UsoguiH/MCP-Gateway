@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Secure MCP Gateway — Control Plane</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23D97757'/%3E%3Cpath d='M12 4.2 6.2 6.3v4.2c0 3.5 2.4 6 5.8 7.6 3.4-1.6 5.8-4.1 5.8-7.6V6.3z' fill='none' stroke='white' stroke-width='1.7' stroke-linejoin='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/ui/style.css">
+</head>
+<body>
+
+<!-- ============================ Production sign-in ============================ -->
+<section class="auth" id="login-view" dir="rtl">
+  <!-- sign-in form -->
+  <section class="auth-panel">
+    <div class="auth-inner">
+      <h1 class="auth-h1 animate-element" id="ac-title" style="animation-delay:.1s">مرحباً</h1>
+      <p class="auth-p animate-element" id="ac-sub" style="animation-delay:.2s">أدخل بيانات الدخول للوصول إلى لوحة التحكم.</p>
+
+      <form class="auth-form2" id="login-form" onsubmit="return false" autocomplete="on">
+        <!-- Step 1: username + password -->
+        <div id="step-credentials">
+          <div class="field animate-element" style="animation-delay:.3s">
+            <label class="lbl" for="login-user">اسم المستخدم</label>
+            <div class="glass"><input class="inp2" id="login-user" autocomplete="username" autocapitalize="none" spellcheck="false" placeholder="أدخل اسم المستخدم"></div>
+          </div>
+          <div class="field animate-element" style="animation-delay:.4s">
+            <label class="lbl" for="login-pass">كلمة المرور</label>
+            <div class="glass"><div class="pwbox">
+              <input class="inp2" id="login-pass" type="password" autocomplete="current-password" placeholder="أدخل كلمة المرور">
+              <button type="button" class="pweye" id="pw-toggle" aria-label="إظهار كلمة المرور" title="إظهار كلمة المرور"></button>
+            </div></div>
+          </div>
+          <div class="rowend animate-element" style="animation-delay:.5s">
+            <button type="button" class="glink" id="reset-link">إعادة تعيين كلمة المرور</button>
+          </div>
+          <button class="gbtn animate-element" id="signin-btn" type="submit" style="animation-delay:.6s">تسجيل الدخول</button>
+        </div>
+
+        <!-- Step 2: authenticator (only shown when MFA is enforced) -->
+        <div id="step-mfa" class="hidden">
+          <div class="mfa-line animate-element" style="animation-delay:.3s">تسجيل الدخول باسم <b id="mfa-user"></b> · <button type="button" class="glink" id="mfa-back">تغيير</button></div>
+          <div class="field animate-element" style="animation-delay:.4s">
+            <label class="lbl" for="login-otp">رمز المصادقة <span class="lbl-hint">رمز مكوّن من 6 أرقام من تطبيقك</span></label>
+            <div class="glass"><input class="inp2 otp2" id="login-otp" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="——————"></div>
+          </div>
+          <button class="gbtn animate-element" id="mfa-btn" type="button" style="animation-delay:.5s">تحقّق وتسجيل الدخول</button>
+        </div>
+
+        <div class="err2" id="login-error"></div>
+      </form>
+    </div>
+  </section>
+</section>
+
+<!-- ============================ App shell — Linear-style left sidebar ============================ -->
+<div class="shell hidden" id="app-view">
+  <aside class="side">
+    <div class="side-top">
+      <button class="ws" type="button" title="Secure MCP Gateway">
+        <span class="ws-av" id="ws-av"></span>
+        <span class="ws-name">Secure MCP Gateway</span>
+        <svg class="ws-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
+      </button>
+    </div>
+    <nav class="side-nav" id="side-nav"></nav>
+    <div class="side-foot">
+      <div class="uchip">
+        <span class="avatar" id="u-avatar"></span>
+        <div class="u-meta"><div class="u-name" id="u-name"></div><div class="u-role" id="u-role"></div></div>
+        <span class="clear-tag" id="u-clear"></span>
+      </div>
+      <div class="side-tools">
+        <button class="side-ic" id="theme-btn" onclick="toggleTheme()" title="Theme" aria-label="Toggle theme"></button>
+        <button class="side-ic" onclick="toggleLang()" title="العربية / English" aria-label="Language"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3.5 9h17M3.5 15h17M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/></svg></button>
+        <button class="side-ic" onclick="logout()" title="Sign out" aria-label="Sign out"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg></button>
+        <button class="side-ic side-help" title="Help" aria-label="Help"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.2 9.2a2.8 2.8 0 0 1 5.4.9c0 1.9-2.8 2.5-2.8 2.5"/><path d="M12 17h.01"/></svg></button>
+      </div>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="content-top">
+      <button class="side-ic menu-btn" onclick="document.getElementById('app-view').classList.toggle('side-open')" title="Menu">☰</button>
+      <div class="ct-title" id="pg-title">Overview</div>
+      <div class="ct-right">
+        <span class="sys-chip" id="chain-chip"><span class="dot"></span> Audit chain</span>
+      </div>
+    </header>
+    <div id="view"></div>
+  </div>
+</div>
+
+<script src="/ui/app.js"></script>
+</body>
+</html>

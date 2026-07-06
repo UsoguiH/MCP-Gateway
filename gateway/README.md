@@ -2,19 +2,32 @@
 
 A runnable implementation of the **MCP Gateway control plane** from
 `MCP-Secure-Architecture-v10-Final-BuildSpec.md` §4.4. It builds now, on this
-machine, with **no GPU**: the only GPU-dependent part (the LLM) sits behind a
-mock adapter and is swapped for vLLM later by changing one config value.
+machine, with **no GPU**: the gateway runs **no model of its own**. It is a pure
+Policy Enforcement Point — each colleague's local LLM connects to the inbound MCP
+endpoint (`POST /mcp`) and drives tools through the control pipeline.
 
-The two production **MCP servers are intentionally not chosen yet**. Two
-throwaway reference servers (`servers/docs_server.py`, `servers/actions_server.py`)
-stand in so the gateway can be exercised end-to-end; they are deleted after the
-pilot, exactly as the build plan describes.
+Two throwaway reference servers (`servers/docs_server.py`,
+`servers/actions_server.py`) exercise the gateway's security fixtures end-to-end.
+
+Two **production MCP servers** ship alongside them (enable in `config.yaml`):
+
+| Server | File | Coverage |
+|---|---|---|
+| **postgres-mcp** (83 tools) | `servers/postgres_server.py` | Full read/write PostgreSQL: query execution (read-only guarded, writes, atomic transactions, EXPLAIN), complete schema inspection, row CRUD/upsert, DDL (tables/columns/indexes/constraints/views/matviews/sequences/enums/schemas), maintenance (VACUUM/ANALYZE/REINDEX), monitoring (activity, locks, blockers, cache ratios, index usage, replication), roles & GRANT/REVOKE, CSV import/export via COPY. Config: `POSTGRES_URL` (+ `POSTGRES_STATEMENT_TIMEOUT_MS`, `POSTGRES_MAX_ROWS`, `POSTGRES_ALLOW_DANGEROUS`). |
+| **gitea-mcp** (116 tools) | `servers/gitea_server.py` | Full Gitea REST v1: repos (CRUD/fork/transfer/topics/stars/watch), branches + protection, tags, commits/diffs/statuses, file contents (read/create/update/delete + batch multi-file commits, auto SHA resolution), issues + comments + labels (name→id resolution) + milestones, pull requests (full flow: create/edit/merge-all-strategies/diff/files/reviews/reviewer-requests), releases, webhooks, deploy keys, collaborators, orgs & teams, notifications. Config: `GITEA_URL`, `GITEA_TOKEN`. |
+
+Both are hardened the same way: env-only credentials (never model-visible),
+JSON-string results with structured errors (never raw exceptions), result-size
+caps, destructive-op guards (`confirm=true`, `POSTGRES_ALLOW_DANGEROUS`,
+required WHERE clauses), and parameterized/identifier-quoted SQL throughout.
+`tests/test_mcp_servers.py` drives both against real backends (Docker Postgres
++ Gitea) and skips cleanly when those are absent.
 
 ## What it enforces (each maps to the spec + the v7 flaw it closes)
 
 | Control | Where | Spec / flaw |
 |---|---|---|
-| **TPM+PIN two-factor auth** — X.509 client cert (PIN-sealed key) + proof-of-possession → short-lived **ES256** tokens **bound to the cert** (RFC 8705 `cnf.x5t#S256`, `amr:[cert,pin]`); anti-hammering lockout; Tier-3 **step-up** (RFC 9470); identity revocation kill-switch | `app/auth.py`, `app/pki.py` | §4.1 / A3 |
+| **Production login — two factors, enforced** — username + strong password (salted **PBKDF2-HMAC-SHA256**, 600k iters) **+ mandatory TOTP authenticator** (RFC 6238; per-user enrolled secret, AES-256-GCM-encrypted at rest under the KEK) → short-lived **ES256** session tokens (RFC 8705-bound); anti-hammering lockout; Tier-3 **step-up** (RFC 9470); identity revocation kill-switch. Bootstrap operators with `scripts/seed_credentials.py`. TPM+PIN X.509 client-cert login is a supported upgrade. | `app/auth.py`, `app/pki.py` | §4.1 / A3 |
 | ABAC: role × clearance × classification × tool tier, deny-by-default | `app/authz.py`, `policy.yaml` | §4.1, §5 / B5 |
 | Tool risk registry (gateway-owned) + **hash pinning / rug-pull auto-quarantine** | `app/registry.py` | §4.4.3 / B4 |
 | **Prompt-injection containment**: taint tracking, tainted args can never auto-execute a write | `app/taint.py`, `app/gateway.py` | §4.5 / B1 |
@@ -24,7 +37,7 @@ pilot, exactly as the build plan describes.
 | Tamper-**proof HMAC-SHA256 hash-chained** audit (keyed, not a bare hash) + content minimization (digests, not raw PII) | `app/audit.py` | §4.9 / B10 |
 | Kill switch (global/server/tool/user) + rate limiting | `app/controls.py` | §4.4.8 |
 | Protocol hardening: schema-shaped args, size limits on args & results | `app/gateway.py` | §4.4.5 / B12 |
-| **LLM adapter = the single GPU swap point** | `app/llm.py` | §4.3 / A1 |
+| **Inbound MCP endpoint** — each client's own LLM connects via `POST /mcp` (Streamable HTTP); the gateway runs no model | `app/mcp_server.py` | §4.3 / A1 |
 
 ## Run it
 
@@ -32,23 +45,25 @@ pilot, exactly as the build plan describes.
 cd gateway
 pip install fastapi uvicorn "pyjwt[crypto]" cryptography pyyaml pytest httpx mcp
 
-# start (mock LLM, no GPU). On first run the dev PKI (CA, ES256 signing key,
-# per-user client certs) is generated under gateway/pki/.
+# start (no model — clients drive tools via POST /mcp). On first run the dev PKI
+# (CA, ES256 signing key, per-user client certs) is generated under gateway/pki/.
 python -m uvicorn app.main:app --host 127.0.0.1 --port 8800
 # open http://127.0.0.1:8800/
 ```
 
-**Login is two-factor: TPM-bound certificate + PIN — no passwords.** Factor 1 is a
-CA-issued client certificate whose private key is TPM-sealed (here: PKCS#8 encrypted
-under the PIN); factor 2 is the PIN that unlocks it. The gateway verifies
-proof-of-possession (which requires the PIN) and issues a short-lived ES256 token
-bound to the certificate. A username alone gets you nothing; 5 wrong PINs lock the
-identity. The browser demo runs this server-side via `/api/dev/login` (disabled in
-production via `dev_login_enabled: false`).
+**Login is a production username + strong password.** Operators sign in on the web
+console with their username and a strong password; the gateway verifies it against a
+salted **PBKDF2-HMAC-SHA256** hash (600k iterations, constant-time compare) and issues
+a short-lived **ES256** session token bound to a per-session key (RFC 8705). Five wrong
+passwords lock the identity (anti-hammering; self-heals after a short cooldown). **MFA**
+is an optional TOTP layer — set `auth.require_mfa: true` to enforce the authenticator
+step. The developer login (`/api/dev/*`, the TPM+PIN certificate flow) is **disabled**
+in this build (`dev_login_enabled: false`), so stakeholders see only the production sign-in.
 
-**Demo users:** `sara` (employee) · `khalid` (analyst) · `noura` & `faisal`
-(approvers) · `admin`. **Per-user demo PINs are shown on the login screen** (from
-`/api/dev/users`) and stored in `pki/dev_pins.json` (dev only — absent in production).
+**Demo operators:** `sara` (employee) · `khalid` (analyst) · `noura` & `faisal`
+(approvers) · `admin` (admin). Password hashes live in `data/credentials.json` — never
+plaintext, never in code. The pilot's demo passwords are delivered out-of-band; rotate
+them for production with `auth.hash_password()` and overwrite `data/credentials.json`.
 
 ### Things to try in the UI
 - As **sara**: `search payroll` → Saudi PII comes back **masked** (her clearance < secret).
@@ -66,24 +81,22 @@ production via `dev_login_enabled: false`).
 ```bash
 python -m pytest tests/test_security.py tests/test_auth.py tests/test_fuzz.py -q  # 53 unit + fuzz
 # start the server, then:
-python -m pytest tests/test_e2e.py -q           # 22 end-to-end HTTP tests
+python -m pytest tests/test_e2e.py -q           # 32 end-to-end HTTP tests
 ```
 
-## When the GPUs arrive (the only change)
+## Connecting a model (inference is client-side)
 
-Edit `config.yaml`:
+The gateway runs **no model** — it is a pure Policy Enforcement Point and MCP
+router. Each colleague runs their own local LLM (or a brokered confidential-compute
+GPU) as an **MCP client** that connects to the inbound endpoint:
 
-```yaml
-llm:
-  provider: openai_compat          # was: mock
-  base_url: "http://<vllm-host>:8000/v1"
-  model: "qwen3.5"
+```
+POST /mcp        # Streamable HTTP · Authorization: Bearer <session token>
 ```
 
-`app/llm.py` already implements the OpenAI-compatible tool-calling path against
-vLLM. No other module changes: authorization, taint, HITL, DLP, and audit all
-sit above the adapter. The planner now comes from the real model; every control
-in the table above still runs on the model's proposed tool calls.
+The client drives `initialize` → `tools/list` → `tools/call`; every proposed tool
+call still passes through authorization, taint, HITL, DLP, and audit exactly as the
+table above describes. No GPU is ever attached to the gateway itself.
 
 ## Other production swap points (marked in code)
 - `app/auth.py` + `app/pki.py` — dev cert auth (local CA, on-disk signing key,
@@ -105,9 +118,9 @@ context/audit); **registry onboarding governance** (Risk-Board approval of new t
 (Keycloak/OIDC) auth mode**; **startup config validation**; **metrics + SIEM export**; and
 **deployment artifacts** (`requirements.txt`, `Dockerfile`, `docker-compose.yml`, CI); **NDMO
 classification propagation**; **strict tool-arg schema validation** (`additionalProperties:false`);
-parser-fuzz suite; OpenBao vault adapter. **75 tests green.**
+parser-fuzz suite; OpenBao vault adapter. **85 tests green.**
 
 ## Operator-provided infrastructure (seams ready, not buildable on a dev box)
-Production MCP server selection; real vLLM+GPU; HSM + workstation TPM; a Keycloak host
+Production MCP server selection; client-side LLM hosts + brokered confidential-compute GPU; HSM + workstation TPM; a Keycloak host
 (`auth.mode: oidc`); TLS 1.3 + mTLS terminator + SPIFFE; SIEM product; DR site; confidential
 computing; Arabic NER model. These are later phases in `MCP-Platform-Build-Plan.md`.

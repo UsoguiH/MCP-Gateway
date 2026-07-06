@@ -9,9 +9,15 @@ services:
       - "8800:8800"
     environment:
       # DEV secrets — replace from the secret store / HSM in staging & prod.
+      # MCP_GATEWAY_KEK also encrypts enrolled TOTP secrets (data/mfa_secrets.json).
       MCP_GATEWAY_KEK: "dev-kek-change-me"
       MCP_AUDIT_KEY: "dev-audit-key-change-me"
       MCP_VAULT_KEY: "dev-vault-key-change-me"
+      # Production MCP-server backends (servers get these via config.yaml ${VAR}
+      # expansion). Leave empty to boot without them; tools then return clean errors.
+      POSTGRES_URL: "${POSTGRES_URL:-}"
+      GITEA_URL: "${GITEA_URL:-}"
+      GITEA_TOKEN: "${GITEA_TOKEN:-}"
     volumes:
       - gw-data:/app/data
       - gw-pki:/app/pki

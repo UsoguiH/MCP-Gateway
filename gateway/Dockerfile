@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
 COPY servers ./servers
 COPY ui ./ui
+COPY scripts ./scripts
 COPY config.yaml policy.yaml ./
 
 # Runtime state (PKI, audit, registry). Mount a volume here in production; in an

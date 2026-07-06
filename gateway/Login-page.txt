@@ -1,0 +1,217 @@
+import React, { useState } from 'react';
+import { Eye, EyeOff } from 'lucide-react';
+
+// --- SUB-COMPONENTS ---
+
+const GlassInputWrapper = ({ children }) => (
+  <div className="rounded-2xl border border-gray-200 bg-gray-900/5 backdrop-blur-sm transition-colors focus-within:border-green-400/70 focus-within:bg-green-500/10">
+    {children}
+  </div>
+);
+
+const TestimonialCard = ({ testimonial, delay }) => (
+  <div
+    className="animate-testimonial flex items-start gap-3 rounded-3xl bg-white/40 backdrop-blur-xl border border-white/10 p-5 w-64"
+    style={{ animationDelay: delay }}
+    dir="rtl"
+  >
+    <img src={testimonial.avatarSrc} className="h-10 w-10 object-cover rounded-2xl" alt="avatar" />
+    <div className="text-sm leading-snug text-right">
+      <p className="flex items-center gap-1 font-medium text-gray-900">{testimonial.name}</p>
+      <p className="text-gray-500">{testimonial.handle}</p>
+      <p className="mt-1 text-gray-700">{testimonial.text}</p>
+    </div>
+  </div>
+);
+
+// --- MAIN COMPONENT ---
+
+export const SignInPage = ({
+  title = <span className="font-light text-gray-900 tracking-tighter">مرحباً</span>,
+  description = "الوصول إلى حسابك ومتابعة رحلتك معنا",
+  heroImageSrc,
+  testimonials = [],
+  onSignIn,
+  onResetPassword,
+  onCreateAccount,
+}) => {
+  const [showPassword, setShowPassword] = useState(false);
+
+  return (
+    <div dir="rtl" className="min-h-[600px] flex flex-col md:flex-row w-full bg-white text-right">
+      <style>{`
+        @keyframes elementIn {
+          from { opacity: 0; transform: translateY(24px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes testimonialIn {
+          from { opacity: 0; transform: translateY(28px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-element {
+          animation: elementIn 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
+        }
+        .animate-testimonial {
+          animation: testimonialIn 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
+        }
+      `}</style>
+
+      {/* Right-to-left column: sign-in form */}
+      <section className="flex-1 flex items-center justify-center p-8">
+        <div className="w-full max-w-md">
+          <div className="flex flex-col gap-6">
+            <h1
+              className="animate-element text-4xl md:text-5xl font-semibold leading-tight"
+              style={{ animationDelay: '0.1s' }}
+            >
+              {title}
+            </h1>
+            <p className="animate-element text-gray-500" style={{ animationDelay: '0.2s' }}>
+              {description}
+            </p>
+
+            <form className="space-y-5" onSubmit={onSignIn}>
+              <div className="animate-element" style={{ animationDelay: '0.3s' }}>
+                <label className="text-sm font-medium text-gray-500">البريد الإلكتروني</label>
+                <GlassInputWrapper>
+                  <input
+                    name="email"
+                    type="email"
+                    placeholder="أدخل بريدك الإلكتروني"
+                    className="w-full bg-transparent text-sm p-4 rounded-2xl focus:outline-none text-right"
+                  />
+                </GlassInputWrapper>
+              </div>
+
+              <div className="animate-element" style={{ animationDelay: '0.4s' }}>
+                <label className="text-sm font-medium text-gray-500">كلمة المرور</label>
+                <GlassInputWrapper>
+                  <div className="relative">
+                    <input
+                      name="password"
+                      type={showPassword ? 'text' : 'password'}
+                      placeholder="أدخل كلمة المرور"
+                      className="w-full bg-transparent text-sm p-4 pl-12 rounded-2xl focus:outline-none text-right"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute inset-y-0 left-3 flex items-center"
+                    >
+                      {showPassword ? (
+                        <EyeOff className="w-5 h-5 text-gray-500 hover:text-gray-900 transition-colors" />
+                      ) : (
+                        <Eye className="w-5 h-5 text-gray-500 hover:text-gray-900 transition-colors" />
+                      )}
+                    </button>
+                  </div>
+                </GlassInputWrapper>
+              </div>
+
+              <div
+                className="animate-element flex items-center justify-end text-sm"
+                style={{ animationDelay: '0.5s' }}
+              >
+                <a
+                  href="#"
+                  onClick={(e) => { e.preventDefault(); onResetPassword?.(); }}
+                  className="hover:underline text-green-500 transition-colors"
+                >
+                  إعادة تعيين كلمة المرور
+                </a>
+              </div>
+
+              <button
+                type="submit"
+                className="animate-element w-full rounded-2xl bg-green-600 py-4 font-medium text-white hover:bg-green-700 transition-colors"
+                style={{ animationDelay: '0.6s' }}
+              >
+                تسجيل الدخول
+              </button>
+            </form>
+
+            <p
+              className="animate-element text-center text-sm"
+              style={{ animationDelay: '0.7s' }}
+            >
+              <a
+                href="#"
+                onClick={(e) => { e.preventDefault(); onCreateAccount?.(); }}
+                className="text-green-500 hover:underline transition-colors font-medium"
+              >
+                إنشاء حساب
+              </a>
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* Testimonials column (photo removed) */}
+      {heroImageSrc && (
+        <section className="hidden md:block flex-1 relative p-4 bg-gradient-to-bl from-green-50 to-white">
+          {testimonials.length > 0 && (
+            <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex gap-4 px-8 w-full justify-center">
+              <TestimonialCard testimonial={testimonials[0]} delay="1s" />
+              {testimonials[1] && (
+                <div className="hidden xl:flex">
+                  <TestimonialCard testimonial={testimonials[1]} delay="1.2s" />
+                </div>
+              )}
+              {testimonials[2] && (
+                <div className="hidden 2xl:flex">
+                  <TestimonialCard testimonial={testimonials[2]} delay="1.4s" />
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+      )}
+    </div>
+  );
+};
+
+// --- DEMO / DEFAULT EXPORT (sample data so this renders standalone) ---
+
+const sampleTestimonials = [
+  {
+    avatarSrc: 'https://i.pravatar.cc/100?img=1',
+    name: 'سارة أحمد',
+    handle: '@sarah_a',
+    text: 'هذا المنتج غيّر طريقة عمل فريقنا بالكامل.',
+  },
+  {
+    avatarSrc: 'https://i.pravatar.cc/100?img=2',
+    name: 'مروان خالد',
+    handle: '@marwan_k',
+    text: 'الإعداد استغرق خمس دقائق فقط، والدعم رائع.',
+  },
+  {
+    avatarSrc: 'https://i.pravatar.cc/100?img=3',
+    name: 'ليلى حسن',
+    handle: '@laila_h',
+    text: 'تماماً ما كنا نحتاجه، ولا شيء زائد عن الحاجة.',
+  },
+];
+
+export default function App() {
+  const [replayKey, setReplayKey] = useState(0);
+
+  return (
+    <div className="relative" dir="rtl">
+      <button
+        onClick={() => setReplayKey((k) => k + 1)}
+        className="absolute top-3 left-3 z-10 text-xs px-3 py-1.5 rounded-full bg-gray-900 text-white hover:bg-gray-700 transition-colors"
+      >
+        إعادة تشغيل الحركة
+      </button>
+      <SignInPage
+        key={replayKey}
+        heroImageSrc="placeholder"
+        testimonials={sampleTestimonials}
+        onSignIn={(e) => { e.preventDefault(); alert('تم إرسال تسجيل الدخول'); }}
+        onResetPassword={() => alert('تم النقر على إعادة تعيين كلمة المرور')}
+        onCreateAccount={() => alert('تم النقر على إنشاء حساب')}
+      />
+    </div>
+  );
+}

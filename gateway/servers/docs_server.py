@@ -81,5 +81,25 @@ def read_document(doc_id: int) -> str:
     return json.dumps({"error": f"document {doc_id} not found"})
 
 
+@mcp.resource("docs://index")
+def docs_index() -> str:
+    """Readable resource: the document index (ids, titles, NDMO classifications)."""
+    return json.dumps({"documents": [{"id": d["id"], "title": d["title"],
+                       "classification": d["classification"]} for d in DOCS]}, ensure_ascii=False)
+
+
+@mcp.resource("docs://hr/payroll")
+def payroll_resource() -> str:
+    """Readable resource carrying Saudi PII — exercises resource-read DLP masking."""
+    return json.dumps(DOCS[4], ensure_ascii=False)          # doc 5: National ID + IBAN
+
+
+@mcp.prompt()
+def summarize_document(doc_id: str) -> str:
+    """Prompt template the agent can fetch and fill (governed like untrusted content)."""
+    return (f"Summarize internal document {doc_id} in three concise bullet points. "
+            "State its NDMO classification and never reveal a national ID or IBAN.")
+
+
 if __name__ == "__main__":
     mcp.run()  # stdio

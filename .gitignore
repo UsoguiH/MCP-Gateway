@@ -3,6 +3,26 @@ gateway/pki/
 gateway/data/*.jsonl
 gateway/data/*.json
 gateway/data/*.log
+# Production TLS material + proxy secret (generated per-deployment, never commit)
+gateway/deploy/tls/
+gateway/deploy/proxy_secret
+# Dev/verification scratch pages (may embed test credentials)
+gateway/ui/_*.html
+
+# Node / dashboard build tooling
+node_modules/
+gateway/dashboard/dist/
+.vite/
+*.tsbuildinfo
+
+# Large build artifacts — rebuild these, never store them in git
+*.tar
+*.bundle
+gateway/*.tar
+
+# Unrelated saved web pages (not part of the project)
+Google Gemini.html
+Google Gemini_files/
 
 # Python
 __pycache__/
@@ -15,3 +35,10 @@ venv/
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# Reference dashboard designs (third-party Figma exports / working material — not project source)
+ref/
+mcp-gateway-dashboard/
+mcp-gateway-dashboard-v2/
+dashboard-ref/
+*.zip

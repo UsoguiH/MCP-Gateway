@@ -36,10 +36,28 @@ auth:
   login_rate_per_minute: 120                 # per-IP throttle on auth endpoints (M1/M5); tighten in prod
   max_request_bytes: 65536                   # reject oversized request bodies (M3)
   pki_dir: "pki"                             # dev CA + signing key + PIN-sealed user certs
-  dev_login_enabled: true                    # DEV ONLY: /api/dev/login (still requires the PIN)
+  dev_login_enabled: false                   # DEV path disabled: production username+password login only
+  # Production sign-in: username + strong password (salted PBKDF2, hashes in
+  # data/credentials.json). MFA is a TOTP layer on top — set require_mfa: true to
+  # enforce the authenticator step (operators enrol their own authenticator app).
+  require_mfa: true                          # ENFORCED: password + TOTP authenticator (RFC 6238)
+  dev_quick_login: true                      # DEV ONLY: dashboard "Enter now" button skips
+                                             # password+MFA and opens as admin. Set false for prod.
+  pbkdf2_iterations: 600000                  # OWASP 2024 floor for PBKDF2-HMAC-SHA256
+  password_max_age_days: 90                   # force rotation after this many days (0 = never)
   # Origin allow-list for the DNS-rebinding defense (MCP spec MUST). Real default
   # (not "*") so the guard is active; add your gateway origins in production.
   allowed_origins: ["http://127.0.0.1:8800", "http://localhost:8800"]
+  # Trusted-proxy enforcement (production). When enabled the gateway refuses any
+  # /api or /mcp request that does not carry the shared secret the mTLS terminator
+  # injects — so the app can never be reached directly, bypassing TLS + client-cert
+  # verification. Supply the secret via MCP_PROXY_SHARED_SECRET(_FILE); the nginx
+  # config in deploy/nginx.conf sets the matching header. Enable in production
+  # (docker-compose.tls.yml wires the whole path); dev over loopback leaves it off.
+  trusted_proxy:
+    enabled: false
+    header: "x-proxy-auth"
+    shared_secret: ""            # prefer MCP_PROXY_SHARED_SECRET_FILE (Docker secret)
 
 gateway:
   host: "127.0.0.1"
@@ -67,7 +85,10 @@ audit:
 # Tool onboarding governance. Dev auto-activates new tools; production requires a
 # Risk-Board approval before a newly-discovered tool is callable.
 registry:
-  require_approval: false              # set true in production (Risk-Board gate)
+  require_approval: true               # Risk-Board gate: newly discovered tools land
+                                       # 'pending' and are NOT callable until an admin
+                                       # approves them (POST .../approve). Already-onboarded
+                                       # tools keep their status; this gates future drift.
 
 servers:
   # Reference test fixtures (deleted after pilot; production servers onboard via registry)
@@ -77,3 +98,22 @@ servers:
   - name: actions
     command: python
     args: ["servers/actions_server.py"]
+  # Production servers. env values support ${VAR} expansion from the gateway's
+  # own environment so secrets never live in this file. Both servers connect
+  # lazily: with the env unset they still boot and register their tools, and
+  # each call returns a clean structured error instead of crashing.
+  - name: postgres
+    command: python
+    args: ["servers/postgres_server.py"]
+    env:
+      POSTGRES_URL: "${POSTGRES_URL}"            # postgresql://user:pass@host:5432/db
+      POSTGRES_STATEMENT_TIMEOUT_MS: "30000"
+      POSTGRES_MAX_ROWS: "500"
+      POSTGRES_ALLOW_DANGEROUS: "0"              # 1 unlocks drop_database/terminate_backend
+  - name: gitea
+    command: python
+    args: ["servers/gitea_server.py"]
+    env:
+      GITEA_URL: "${GITEA_URL}"                  # e.g. http://localhost:3000
+      GITEA_TOKEN: "${GITEA_TOKEN}"              # personal access token
+

@@ -1,0 +1,8 @@
+@import "tailwindcss";
+
+:root { color-scheme: light; }
+
+* { box-sizing: border-box; }
+
+/* Recharts surfaces should never paint a white box over our #f9f9fa cards. */
+.recharts-surface { overflow: visible; }

@@ -93,6 +93,20 @@ def test_default_tiers():
     assert _default_tier("send_message") == 2
     assert _default_tier("delete_record") == 3
     assert _default_tier("frobnicate") == 2  # ambiguous -> human review
+    # postgres/gitea-server tool names (read-only inspection stays tier 0)
+    assert _default_tier("server_info") == 0
+    assert _default_tier("describe_table") == 0
+    assert _default_tier("select_rows") == 0
+    assert _default_tier("cache_hit_ratio") == 0
+    assert _default_tier("is_pull_request_merged") == 0
+    assert _default_tier("insert_row") == 1
+    assert _default_tier("vacuum_table") == 1
+    assert _default_tier("merge_pull_request") == 2   # outward-visible, human gate
+    assert _default_tier("grant_privileges") == 2     # privilege change, human gate
+    assert _default_tier("export_query_csv") == 2     # bulk-exfil channel, human gate
+    assert _default_tier("truncate_table") == 3       # destructive, two-person
+    assert _default_tier("terminate_backend") == 3    # destructive, two-person
+    assert _default_tier("alter_column") == 2         # ambiguous DDL -> human review
 
 
 def test_fingerprint_changes_on_drift():
@@ -106,6 +120,7 @@ def test_registry_drift_quarantines_and_reactivates(tmp_path, monkeypatch):
     # auto-quarantine the tool; approving the drift re-pins and reactivates it.
     import app.registry as R
     monkeypatch.setattr(R, "_REG_FILE", tmp_path / "reg.json")
+    monkeypatch.setattr(R, "_REQUIRE_APPROVAL", False)   # isolate drift from the onboarding gate
     reg = R.Registry()
 
     tool = {"server": "s", "name": "act", "description": "original", "schema": {}}
@@ -200,8 +215,8 @@ def test_unknown_role_denied():
 
 
 # ---------- Kill switch & rate limiter ----------
-def test_killswitch_scopes():
-    ks = KillSwitch()
+def test_killswitch_scopes(tmp_path):
+    ks = KillSwitch(path=tmp_path / "ks.json")     # isolated: never touch prod file
     ks.engage("tool:actions:delete_record")
     assert ks.blocked(user="a", server="actions", tool="delete_record")
     assert not ks.blocked(user="a", server="actions", tool="update_record")

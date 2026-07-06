@@ -35,14 +35,15 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from .config import CONFIG, ROOT
+from .config import CONFIG, ROOT, secret
 
 
 def _kek() -> bytes:
     """Key-encryption key for the at-rest CA + token-signing keys (finding C2).
     PRODUCTION: set MCP_GATEWAY_KEK from a secret store, or hold the keys in an HSM
-    so they never touch disk. Dev fallback keeps the demo runnable."""
-    return os.environ.get("MCP_GATEWAY_KEK", "dev-kek-change-me").encode("utf-8")
+    so they never touch disk. Dev fallback keeps the demo runnable. Supports
+    MCP_GATEWAY_KEK_FILE (Docker/K8s secret mount)."""
+    return secret("MCP_GATEWAY_KEK", "dev-kek-change-me").encode("utf-8")
 
 _PKI_DIR = ROOT / CONFIG["auth"].get("pki_dir", "pki")
 _CA_CERT = _PKI_DIR / "ca.cert.pem"

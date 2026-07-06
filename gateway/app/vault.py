@@ -26,7 +26,8 @@ class Vault:
         # provider: dev (local HMAC) | openbao (dynamic DB creds via hvac).
         self.provider = os.environ.get("MCP_VAULT_PROVIDER",
                                        (CONFIG.get("vault_provider") or "dev"))
-        self._base = os.environ.get("MCP_VAULT_KEY", "dev-vault-key-change-me").encode()
+        from .config import secret
+        self._base = secret("MCP_VAULT_KEY", "dev-vault-key-change-me").encode()
         self._leases: dict[str, dict] = {}     # lease_id -> {server,user,exp}
         self._lock = threading.Lock()
 

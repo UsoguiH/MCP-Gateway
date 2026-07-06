@@ -11,6 +11,8 @@ from pathlib import Path
 # Reviewed, mirrored top-level dependencies (transitive deps are pulled by these).
 ALLOWLIST = {
     "fastapi", "uvicorn", "pyjwt", "cryptography", "pyyaml", "httpx", "mcp", "pytest",
+    "jsonschema",   # W9.6 arg-schema enforcement — pinned explicitly, never transitive-only
+    "psycopg",      # postgres-mcp server driver
 }
 
 REQ = Path(__file__).resolve().parent.parent / "requirements.txt"

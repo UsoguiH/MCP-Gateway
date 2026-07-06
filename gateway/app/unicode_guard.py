@@ -42,7 +42,42 @@ def sanitize(text: str) -> tuple[str, list[str]]:
         flags.append("stripped_other_controls")
         normalized = "".join(c for c in normalized if c not in controls)
 
+    # Homoglyph / confusable defense (Unicode TR39 mixed-script heuristic): a single
+    # token mixing Latin with Cyrillic or Greek letters is the classic spoof
+    # (e.g. "pаypal" with a Cyrillic а). We FLAG rather than rewrite — the approver
+    # is warned and the taint layer treats it as suspicious. Arabic + Latin/digits
+    # is legitimate in these UIs and is NOT flagged.
+    confusable = _mixed_script_tokens(normalized)
+    if confusable:
+        flags.append("homoglyph_mixed_script:" + ",".join(confusable[:5]))
+
     return normalized, flags
+
+
+# Confusable script families that should never co-occur inside one word token.
+_CONFUSABLE_SCRIPTS = ("LATIN", "CYRILLIC", "GREEK")
+
+
+def _token_scripts(token: str) -> set[str]:
+    scripts = set()
+    for c in token:
+        if not c.isalpha():
+            continue
+        name = unicodedata.name(c, "")
+        for s in _CONFUSABLE_SCRIPTS:
+            if name.startswith(s):
+                scripts.add(s)
+                break
+    return scripts
+
+
+def _mixed_script_tokens(text: str) -> list[str]:
+    """Tokens that mix two+ confusable scripts (Latin/Cyrillic/Greek)."""
+    flagged = []
+    for token in text.split():
+        if len(_token_scripts(token) & set(_CONFUSABLE_SCRIPTS)) >= 2:
+            flagged.append(token[:40])
+    return flagged
 
 
 def _char_name(c: str) -> str:

@@ -18,6 +18,7 @@ The planner is the *client's* local LLM (it connects via the inbound MCP endpoin
 in mcp_server.py); it only proposes calls, the gateway disposes. Secrets are never
 in model context — the vault injects per-call backend credentials at dispatch.
 """
+import base64
 import json
 import time
 
@@ -176,13 +177,16 @@ class Gateway:
         return await self._dispatch(claims, session, server, tool, clean_args, decision.tier)
 
     async def execute_approved(self, approval: dict, claims_by_user: dict) -> dict:
-        """Run a call that has cleared HITL. Uses the *requester's* clearance for DLP."""
+        """Run a call that has cleared HITL. Uses the *requester's* clearance for DLP,
+        and stores the result so the requesting agent can fetch it back over MCP."""
         requester_claims = claims_by_user(approval["requester"])
         session = approval["requester"]
-        return await self._dispatch(
+        result = await self._dispatch(
             requester_claims, session, approval["server"], approval["tool"],
             approval["arguments"], approval["tier"], approved_id=approval["id"],
         )
+        self.approvals.set_result(approval["id"], result)
+        return result
 
     async def _dispatch(self, claims, session, server, tool, arguments, tier, approved_id=None):
         # Vault: mint a short-lived, per-(server,user) credential and inject it into
@@ -192,7 +196,7 @@ class Gateway:
         if cred:
             call_args[_INJECTED_PARAM] = cred["secret"]
         try:
-            raw = await self.mcp.call(server, tool, call_args)
+            raw, blocks = await self.mcp.call(server, tool, call_args)
         except Exception as exc:
             if cred:
                 vault.revoke(cred["lease"])
@@ -207,58 +211,128 @@ class Gateway:
                          lease=cred["lease"], secret_digest=audit.payload_digest(cred["secret"]))
             vault.revoke(cred["lease"])          # per-call lease, revoked immediately after use
 
-        # size limit on result
-        if len(raw.encode("utf-8")) > MAX_RESULT:
-            raw = raw[:MAX_RESULT]
-            truncated = True
-        else:
-            truncated = False
-
-        # parse if JSON for structured DLP/taint; else treat as text
-        try:
-            parsed = json.loads(raw)
-            is_json = True
-        except json.JSONDecodeError:
-            parsed = raw
-            is_json = False
-
-        # Unicode sanitize result (untrusted content!)
-        parsed, res_uflags = unicode_guard.sanitize_obj(parsed)
-
-        # Record taint: everything a tool returns is untrusted content.
-        self.taint.add_untrusted(session, json.dumps(parsed, ensure_ascii=False) if is_json else parsed,
-                                 source=f"{server}.{tool}")
-
-        # Classification propagation (W3.3): the tool's max data classification is the
-        # DLP unmask threshold — a caller sees fields in the clear only if cleared for it.
-        data_class = classification.tool_classification(self.registry.get(server, tool))
-        caller_cleared = classification.dominates(claims.get("clearance", "public"), data_class)
-
-        # DLP: mask PII the caller is not cleared to see in the clear.
-        detections_meta = []
-        masked = parsed
-        det = dlp.scan(json.dumps(parsed, ensure_ascii=False) if is_json else parsed)
-        pii_masked = bool(det) and not caller_cleared
-        if det and not caller_cleared:
-            masked, detections_meta = dlp.mask_obj(parsed)
-        elif det:
-            detections_meta = det
-
+        g = self._govern(claims, session, f"{server}.{tool}",
+                         classification.tool_classification(self.registry.get(server, tool)), raw)
         audit.record(
             "tool_call", user=claims["sub"], server=server, tool=tool, tier=tier,
-            approved_id=approved_id, truncated=truncated, classification=data_class,
-            result_digest=audit.payload_digest(parsed),
-            pii_detected=[d["type"] for d in detections_meta],
-            pii_masked=pii_masked, result_unicode_flags=res_uflags,
+            approved_id=approved_id, truncated=g["truncated"], classification=g["classification"],
+            result_digest=audit.payload_digest(g["masked"]),
+            pii_detected=g["pii_detected"], pii_masked=g["pii_masked"],
+            result_unicode_flags=g["result_unicode_flags"],
         )
-
         return {
             "server": server, "tool": tool, "status": "executed", "tier": tier,
-            "result": masked, "truncated": truncated, "classification": data_class,
-            "pii_detected": [d["type"] for d in detections_meta],
-            "pii_masked": pii_masked, "result_unicode_flags": res_uflags,
+            "result": g["masked"], "content_blocks": blocks, "truncated": g["truncated"],
+            "classification": g["classification"], "pii_detected": g["pii_detected"],
+            "pii_masked": g["pii_masked"], "result_unicode_flags": g["result_unicode_flags"],
             "approved_id": approved_id,
         }
+
+    def _govern(self, claims, session, source, data_class, raw):
+        """Run untrusted content (a tool result OR a resource read) through the shared
+        governance: size cap -> Unicode sanitize -> taint-record -> DLP-mask by clearance."""
+        if len(raw.encode("utf-8")) > MAX_RESULT:
+            raw, truncated = raw[:MAX_RESULT], True
+        else:
+            truncated = False
+        try:
+            parsed, is_json = json.loads(raw), True
+        except json.JSONDecodeError:
+            parsed, is_json = raw, False
+        parsed, res_uflags = unicode_guard.sanitize_obj(parsed)
+        self.taint.add_untrusted(session, json.dumps(parsed, ensure_ascii=False) if is_json else parsed,
+                                 source=source)
+        caller_cleared = classification.dominates(claims.get("clearance", "public"), data_class)
+        det = dlp.scan(json.dumps(parsed, ensure_ascii=False) if is_json else parsed)
+        masked, detections = parsed, []
+        pii_masked = bool(det) and not caller_cleared
+        if det and not caller_cleared:
+            masked, detections = dlp.mask_obj(parsed)
+        elif det:
+            detections = det
+        return {"masked": masked, "truncated": truncated, "classification": data_class,
+                "pii_detected": [d["type"] for d in detections], "pii_masked": pii_masked,
+                "result_unicode_flags": res_uflags}
+
+    # ---- resources (MCP resources/list, resources/read) — governed like tool output ----
+    def visible_resources(self, claims: dict) -> list[dict]:
+        return [{"uri": _wrap_uri(r["server"], r["uri"]), "name": r.get("name") or r["uri"],
+                 "description": r.get("description", ""), "mimeType": r.get("mimeType") or "text/plain",
+                 "_meta": {"gateway": {"server": r["server"]}}}
+                for r in self.mcp.all_resources()]
+
+    async def read_resource(self, claims: dict, wrapped_uri: str) -> dict:
+        server, orig = _unwrap_uri(wrapped_uri)
+        user = claims["sub"]
+        if server is None:
+            return {"status": "blocked", "reason": "invalid gateway resource uri"}
+        if server not in self.mcp.servers:
+            return {"status": "blocked", "reason": "unknown server"}
+        blocked = kill_switch.blocked(user=user, server=server, tool="__resource__")
+        if blocked:
+            return {"status": "blocked", "reason": f"kill switch active: {blocked}"}
+        if not rate_limiter.allow(user) or not server_limiter.allow(server):
+            return {"status": "blocked", "reason": "rate limit exceeded"}
+        if self._breaker_open(server):
+            return {"status": "blocked", "reason": "circuit open: server temporarily quarantined"}
+        try:
+            raw, blobs = await self.mcp.read_resource(server, orig)
+        except Exception as exc:
+            self._breaker_trip(server)
+            audit.record("resource_error", user=user, server=server,
+                         uri_digest=audit.payload_digest(orig), error=str(exc)[:200])
+            return {"status": "error", "reason": f"resource read failed: {exc}"}
+        self._breaker_reset(server)
+        # resources carry no registry tier; govern at the fail-toward-protected default.
+        g = self._govern(claims, user, f"{server}:resource", classification.tool_classification(None), raw)
+        audit.record("resource_read", user=user, server=server, uri_digest=audit.payload_digest(orig),
+                     classification=g["classification"], pii_detected=g["pii_detected"],
+                     pii_masked=g["pii_masked"], truncated=g["truncated"],
+                     result_unicode_flags=g["result_unicode_flags"])
+        text = g["masked"] if isinstance(g["masked"], str) else json.dumps(g["masked"], ensure_ascii=False)
+        return {"status": "executed", "server": server, "uri": wrapped_uri, "text": text,
+                "blobs": blobs, "classification": g["classification"], "pii_masked": g["pii_masked"]}
+
+    # ---- prompts (MCP prompts/list, prompts/get) — templates re-entering model context ----
+    def visible_prompts(self, claims: dict) -> list[dict]:
+        return [{"name": f"{p['server']}__{p['name']}", "description": p.get("description", ""),
+                 "arguments": p.get("arguments", []),
+                 "_meta": {"gateway": {"server": p["server"], "prompt": p["name"]}}}
+                for p in self.mcp.all_prompts()]
+
+    async def get_prompt(self, claims: dict, server: str, name: str, arguments: dict) -> dict:
+        user = claims["sub"]
+        if server not in self.mcp.servers:
+            return {"status": "blocked", "reason": "unknown server"}
+        if kill_switch.blocked(user=user, server=server, tool="__prompt__"):
+            return {"status": "blocked", "reason": "kill switch active"}
+        if not rate_limiter.allow(user) or not server_limiter.allow(server):
+            return {"status": "blocked", "reason": "rate limit exceeded"}
+        try:
+            got = await self.mcp.get_prompt(server, name, arguments)
+        except Exception as exc:
+            self._breaker_trip(server)
+            audit.record("prompt_error", user=user, server=server, prompt=name, error=str(exc)[:200])
+            return {"status": "error", "reason": f"prompt get failed: {exc}"}
+        self._breaker_reset(server)
+        # A prompt's text is injected into the model context -> sanitize + taint it.
+        msgs = []
+        for m in got.get("messages", []):
+            c = m.get("content") or {}
+            if isinstance(c, dict) and c.get("type") == "text":
+                clean, _ = unicode_guard.sanitize(c.get("text", ""))
+                self.taint.add_untrusted(user, clean, source=f"{server}:prompt:{name}")
+                c = {**c, "text": clean}
+            msgs.append({**m, "content": c})
+        audit.record("prompt_get", user=user, server=server, prompt=name)
+        return {"status": "executed", "description": got.get("description", ""), "messages": msgs}
+
+    # ---- HITL round-trip: the requesting agent fetches an approved call's result ----
+    def approval_result(self, claims: dict, aid: str) -> dict:
+        a = self.approvals.get(aid)
+        if not a or a["requester"] != claims["sub"]:
+            return {"found": False, "reason": "no such approval for this operator"}
+        return {"found": True, "status": a["status"], "result": self.approvals.get_result(aid)}
 
     def _blocked(self, server, tool, reason, user, arguments):
         audit.record("blocked", user=user, server=server, tool=tool, reason=reason,
@@ -309,6 +383,27 @@ def _strip_injected(tool: dict) -> dict:
     if "required" in schema:
         new_schema["required"] = clean_required
     return {**tool, "schema": new_schema}
+
+
+def _wrap_uri(server: str, uri: str) -> str:
+    """Namespace a downstream resource URI under one gateway so reads route back to
+    the owning server unambiguously: mcpgw://<server>/<base64url(original uri)>."""
+    enc = base64.urlsafe_b64encode(uri.encode("utf-8")).decode().rstrip("=")
+    return f"mcpgw://{server}/{enc}"
+
+
+def _unwrap_uri(wrapped: str) -> tuple[str | None, str | None]:
+    prefix = "mcpgw://"
+    if not isinstance(wrapped, str) or not wrapped.startswith(prefix):
+        return None, None
+    server, _, enc = wrapped[len(prefix):].partition("/")
+    if not server or not enc:
+        return None, None
+    try:
+        uri = base64.urlsafe_b64decode(enc + "=" * (-len(enc) % 4)).decode("utf-8")
+    except Exception:
+        return None, None
+    return server, uri
 
 
 def _preview(server, tool, arguments, taint_hits) -> str:

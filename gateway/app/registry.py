@@ -26,10 +26,17 @@ _LOCK = threading.Lock()
 # Governance: dev auto-activates new tools; production requires Risk-Board approval.
 _REQUIRE_APPROVAL = (CONFIG.get("registry", {}) or {}).get("require_approval", False)
 
-_READ_HINTS = ("search", "read", "list", "get", "lookup", "find", "view", "query")
-_TIER1_HINTS = ("update", "set", "modify", "edit", "assign", "create", "add")
-_TIER2_HINTS = ("send", "email", "notify", "message", "post", "publish", "export")
-_TIER3_HINTS = ("delete", "remove", "drop", "purge", "destroy", "wipe")
+_READ_HINTS = ("search", "read", "list", "get", "lookup", "find", "view", "query",
+               "describe", "show", "explain", "count", "select", "stat", "info",
+               "check", "compare", "is_", "status", "size", "usage", "ratio",
+               "distinct", "blocking", "inspect")
+_TIER1_HINTS = ("update", "set", "modify", "edit", "assign", "create", "add",
+                "insert", "upsert", "rename", "refresh", "import", "analyze",
+                "vacuum", "star", "watch", "fork")
+_TIER2_HINTS = ("send", "email", "notify", "message", "post", "publish", "export",
+                "merge", "grant", "revoke", "transfer")
+_TIER3_HINTS = ("delete", "remove", "drop", "purge", "destroy", "wipe", "truncate",
+                "terminate")
 
 
 def tool_fingerprint(tool: dict) -> str:
@@ -40,8 +47,14 @@ def tool_fingerprint(tool: dict) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+_READ_PREFIXES = ("is_", "has_", "get_", "list_", "read_", "show_", "describe_",
+                  "check_", "count_", "search_", "compare_", "explain_", "view_")
+
+
 def _default_tier(name: str) -> int:
     n = name.lower()
+    if n.startswith(_READ_PREFIXES):   # unambiguous read/predicate prefix wins
+        return 0                       # (e.g. is_pull_request_merged has "merge" inside)
     if any(h in n for h in _TIER3_HINTS):
         return 3
     if any(h in n for h in _TIER2_HINTS):

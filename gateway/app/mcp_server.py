@@ -50,6 +50,13 @@ def end_session(sid: str) -> None:
     _SESSIONS.pop(sid, None)
 
 
+def sessions_list() -> list[dict]:
+    """Live inbound MCP sessions (connected client LLMs) for the admin console."""
+    now = time.time()
+    return [{"id": sid[:12], "sub": s["sub"], "age_seconds": round(now - s["created"])}
+            for sid, s in _SESSIONS.items()]
+
+
 # ---------- JSON-RPC helpers ----------
 def _ok(id_, result: dict) -> dict:
     return {"jsonrpc": "2.0", "id": id_, "result": result}
@@ -98,17 +105,19 @@ def _mcp_result(step: dict) -> dict:
 
     if status == "executed":
         payload = step.get("result")
-        out = {"content": [{"type": "text", "text": _as_text(payload)}],
-               "isError": False, "_meta": meta}
+        content = [{"type": "text", "text": _as_text(payload)}]
+        content += step.get("content_blocks") or []      # preserve images/audio/embedded resources
+        out = {"content": content, "isError": False, "_meta": meta}
         if isinstance(payload, dict):        # MCP structuredContent must be an object
             out["structuredContent"] = payload
         return out
 
     if status == "pending_approval":
+        aid = step.get("approval_id")
         txt = (f"HELD FOR HUMAN APPROVAL — not executed. "
-               f"approval_id={step.get('approval_id')}, tier={step.get('tier')}, "
-               f"approvals_required={step.get('approvals_required')}. "
-               f"Ask the user to have an approver release it.")
+               f"approval_id={aid}, tier={step.get('tier')}, "
+               f"approvals_required={step.get('approvals_required')}. Poll resource "
+               f"gateway://approval/{aid} to retrieve the result once an approver releases it.")
         return {"content": [{"type": "text", "text": txt}], "isError": False, "_meta": meta}
 
     # denied | blocked | error -> surface the reason so the model can react, isError=true
@@ -140,7 +149,9 @@ async def dispatch(gw, claims: dict, message, session_id: str | None):
         sid = new_session(claims["sub"])
         result = {
             "protocolVersion": PROTOCOL_VERSION,
-            "capabilities": {"tools": {"listChanged": False}},
+            "capabilities": {"tools": {"listChanged": False},
+                             "resources": {"subscribe": False, "listChanged": False},
+                             "prompts": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
             "instructions": ("Secure MCP Gateway. Every tool call is authorized, "
                              "DLP-scanned and audited; write/destructive tools may be "
@@ -179,5 +190,43 @@ async def dispatch(gw, claims: dict, message, session_id: str | None):
         server, tool = _split_name(name)
         step = await gw.call_tool(claims, server, tool, arguments)
         return 200, _ok(id_, _mcp_result(step)), {}
+
+    if method == "resources/list":
+        return 200, _ok(id_, {"resources": gw.visible_resources(claims)}), {}
+
+    if method == "resources/templates/list":
+        return 200, _ok(id_, {"resourceTemplates": []}), {}
+
+    if method == "resources/read":
+        uri = params.get("uri")
+        if not isinstance(uri, str):
+            return 200, _err(id_, -32602, "invalid params: 'uri' is required"), {}
+        # HITL round-trip: the requesting agent polls its held call's result here.
+        if uri.startswith("gateway://approval/"):
+            info = gw.approval_result(claims, uri[len("gateway://approval/"):])
+            return 200, _ok(id_, {"contents": [{"uri": uri, "mimeType": "application/json",
+                                                 "text": json.dumps(info, ensure_ascii=False)}]}), {}
+        r = await gw.read_resource(claims, uri)
+        if r.get("status") != "executed":
+            return 200, _err(id_, -32002, f"{r.get('status')}: {r.get('reason', 'resource unavailable')}"), {}
+        contents = [{"uri": uri, "mimeType": "text/plain", "text": r["text"]}]
+        contents.extend(r.get("blobs") or [])
+        return 200, _ok(id_, {"contents": contents}), {}
+
+    if method == "prompts/list":
+        return 200, _ok(id_, {"prompts": gw.visible_prompts(claims)}), {}
+
+    if method == "prompts/get":
+        name = params.get("name")
+        arguments = params.get("arguments") or {}
+        if not isinstance(name, str) or _NAME_SEP not in name:
+            return 200, _err(id_, -32602, "invalid params: 'name' must be '<server>__<prompt>'"), {}
+        if not isinstance(arguments, dict):
+            return 200, _err(id_, -32602, "invalid params: 'arguments' must be an object"), {}
+        server, pname = _split_name(name)
+        r = await gw.get_prompt(claims, server, pname, arguments)
+        if r.get("status") != "executed":
+            return 200, _err(id_, -32002, f"{r.get('status')}: {r.get('reason', 'prompt unavailable')}"), {}
+        return 200, _ok(id_, {"description": r["description"], "messages": r["messages"]}), {}
 
     return 200, _err(id_, -32601, f"method not found: {method}"), {}

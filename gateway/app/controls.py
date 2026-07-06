@@ -3,24 +3,40 @@
 Kill switch scopes: global | server:<name> | tool:<server>:<tool> | user:<sub>.
 Rate limiter: sliding-window per-user tool-call budget.
 """
+import json
 import threading
 import time
 
-from .config import GATEWAY
+from .config import DATA_DIR, GATEWAY
+
+_KILL_FILE = DATA_DIR / "killswitch.json"
 
 
 class KillSwitch:
-    def __init__(self):
-        self._killed: set[str] = set()
+    """Durable: engaged scopes persist to data/killswitch.json so an incident-time
+    kill survives a gateway restart (matching the UI's containment promise). Tests
+    pass an isolated `path` so they never poison the shared production file."""
+
+    def __init__(self, path=None):
         self._lock = threading.Lock()
+        self._path = path or _KILL_FILE
+        try:
+            self._killed: set[str] = set(json.loads(self._path.read_text(encoding="utf-8")))
+        except Exception:
+            self._killed = set()
+
+    def _save(self):
+        self._path.write_text(json.dumps(sorted(self._killed)), encoding="utf-8")
 
     def engage(self, scope: str):
         with self._lock:
             self._killed.add(scope)
+            self._save()
 
     def release(self, scope: str):
         with self._lock:
             self._killed.discard(scope)
+            self._save()
 
     def active(self) -> list[str]:
         with self._lock:
