@@ -1,5 +1,6 @@
 """FastAPI application — HTTP surface for the gateway and UI (spec §11 Phase 3-4)."""
 import base64
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -25,7 +26,10 @@ _MAX_BODY = int(CONFIG["auth"].get("max_request_bytes", 65536))
 # client-supplied X-Client-Cert-Thumbprint and re-injects the TLS-verified one.
 from .config import secret as _secret                                    # noqa: E402
 _PROXY_CFG = CONFIG["auth"].get("trusted_proxy", {}) or {}
-_PROXY_REQUIRED = bool(_PROXY_CFG.get("enabled", False))
+# Enable via config OR the MCP_TRUSTED_PROXY env, so one config.yaml serves both
+# dev (proxy off, direct loopback) and prod (proxy on behind the mTLS terminator).
+_PROXY_REQUIRED = bool(_PROXY_CFG.get("enabled", False)) or \
+    os.environ.get("MCP_TRUSTED_PROXY", "").lower() in ("1", "true", "yes")
 _PROXY_SECRET = _secret("MCP_PROXY_SHARED_SECRET", _PROXY_CFG.get("shared_secret") or "")
 _PROXY_HEADER = _PROXY_CFG.get("header", "x-proxy-auth").lower()
 # Per-IP throttle on auth endpoints (finding M1/M5: raises the cost of lockout-DoS

@@ -1,0 +1,95 @@
+# Production-shaped stack — Phase 0 "make it real".
+#
+#   * postgres      : persistent volume, least-privilege role applied on init
+#   * gateway       : real secrets (files), MCP_ENV=production, connects as mcp_app
+#   * proxy (nginx) : mTLS terminator — the ONLY exposed entry point
+#
+# The gateway is never published to the host; you reach it only through the proxy
+# on https://localhost:8443 presenting the client certificate. Bring up with:
+#
+#   docker compose -f docker-compose.prod.yml up --build -d
+#
+# Requires: deploy/secrets/* (generated), deploy/tls/* (generated), .env (MCP_APP_PASSWORD).
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: appdb
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_superuser_pw
+      MCP_APP_PASSWORD: ${MCP_APP_PASSWORD}
+    secrets:
+      - pg_superuser_pw
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres_init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  gateway:
+    build: .
+    image: mcp-gateway:prod
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MCP_ENV: "production"
+      MCP_TRUSTED_PROXY: "1"
+      MCP_GATEWAY_KEK_FILE: /run/secrets/kek
+      MCP_AUDIT_KEY_FILE: /run/secrets/audit_key
+      MCP_VAULT_KEY_FILE: /run/secrets/vault_key
+      MCP_MFA_KEY_FILE: /run/secrets/mfa_key
+      MCP_PROXY_SHARED_SECRET_FILE: /run/secrets/proxy_secret
+      POSTGRES_URL: "postgresql://mcp_login:${MCP_APP_PASSWORD}@postgres:5432/appdb"
+      POSTGRES_ROLE: "mcp_app"
+      POSTGRES_APPNAME: "mcp-gateway"
+    secrets:
+      - kek
+      - audit_key
+      - vault_key
+      - mfa_key
+      - proxy_secret
+    volumes:
+      - gw-data:/app/data
+      - gw-pki:/app/pki
+    expose:
+      - "8800"
+    # --proxy-headers: trust X-Forwarded-* from the terminator so the gateway logs
+    # and rate-limits by the real client IP.
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0",
+              "--port", "8800", "--proxy-headers", "--forwarded-allow-ips", "*"]
+    restart: unless-stopped
+
+  proxy:
+    image: nginx:1.27
+    depends_on:
+      - gateway
+    ports:
+      - "8443:8443"   # HTTPS + mTLS — the only exposed port
+      - "8080:8080"   # redirects to HTTPS
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro
+      - ./deploy/tls:/etc/nginx/tls:ro
+    secrets:
+      - proxy_secret
+    command: >
+      /bin/sh -c "export MCP_PROXY_SHARED_SECRET=$$(cat /run/secrets/proxy_secret);
+      envsubst '$$MCP_PROXY_SHARED_SECRET' < /etc/nginx/templates/nginx.conf.template
+      > /etc/nginx/nginx.conf; exec nginx -g 'daemon off;'"
+    restart: unless-stopped
+
+secrets:
+  kek:             { file: ./deploy/secrets/kek }
+  audit_key:       { file: ./deploy/secrets/audit_key }
+  vault_key:       { file: ./deploy/secrets/vault_key }
+  mfa_key:         { file: ./deploy/secrets/mfa_key }
+  proxy_secret:    { file: ./deploy/secrets/proxy_secret }
+  pg_superuser_pw: { file: ./deploy/secrets/pg_superuser_pw }
+
+volumes:
+  pgdata:
+  gw-data:
+  gw-pki:

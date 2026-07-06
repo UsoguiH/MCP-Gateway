@@ -41,13 +41,14 @@ auth:
   # data/credentials.json). MFA is a TOTP layer on top — set require_mfa: true to
   # enforce the authenticator step (operators enrol their own authenticator app).
   require_mfa: true                          # ENFORCED: password + TOTP authenticator (RFC 6238)
-  dev_quick_login: true                      # DEV ONLY: dashboard "Enter now" button skips
-                                             # password+MFA and opens as admin. Set false for prod.
+  dev_quick_login: false                     # DEV ONLY: dashboard "Enter now" button skips
+                                             # password+MFA and opens as admin. OFF in production.
   pbkdf2_iterations: 600000                  # OWASP 2024 floor for PBKDF2-HMAC-SHA256
   password_max_age_days: 90                   # force rotation after this many days (0 = never)
   # Origin allow-list for the DNS-rebinding defense (MCP spec MUST). Real default
   # (not "*") so the guard is active; add your gateway origins in production.
-  allowed_origins: ["http://127.0.0.1:8800", "http://localhost:8800"]
+  allowed_origins: ["http://127.0.0.1:8800", "http://localhost:8800",
+                    "https://localhost:8443", "https://gateway.internal:8443"]
   # Trusted-proxy enforcement (production). When enabled the gateway refuses any
   # /api or /mcp request that does not carry the shared secret the mTLS terminator
   # injects — so the app can never be reached directly, bypassing TLS + client-cert
@@ -107,6 +108,8 @@ servers:
     args: ["servers/postgres_server.py"]
     env:
       POSTGRES_URL: "${POSTGRES_URL}"            # postgresql://user:pass@host:5432/db
+      POSTGRES_ROLE: "${POSTGRES_ROLE}"          # SET ROLE to this least-privilege role at connect
+      POSTGRES_APPNAME: "${POSTGRES_APPNAME}"    # tags the connection in pg_stat_activity
       POSTGRES_STATEMENT_TIMEOUT_MS: "30000"
       POSTGRES_MAX_ROWS: "500"
       POSTGRES_ALLOW_DANGEROUS: "0"              # 1 unlocks drop_database/terminate_backend

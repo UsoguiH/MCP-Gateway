@@ -86,9 +86,11 @@ def _production_tripwires(config: dict):
         val = secret(var)
         if val in _DEV_SECRETS or (var != "MCP_MFA_KEY" and not val):
             issues.append(f"{var} is unset or a known dev default (supply {var}_FILE or a real secret)")
-    if not config.get("auth", {}).get("trusted_proxy", {}).get("enabled"):
-        issues.append("auth.trusted_proxy.enabled is false (run behind the mTLS terminator; "
-                      "the gateway must not be directly reachable)")
+    proxy_on = config.get("auth", {}).get("trusted_proxy", {}).get("enabled") or \
+        os.environ.get("MCP_TRUSTED_PROXY", "").lower() in ("1", "true", "yes")
+    if not proxy_on:
+        issues.append("trusted proxy is off (set auth.trusted_proxy.enabled or MCP_TRUSTED_PROXY=1; "
+                      "the gateway must run behind the mTLS terminator, not be directly reachable)")
     if issues:
         strict = os.environ.get("MCP_ENV", "").lower() in ("production", "prod")
         header = "PRODUCTION CONFIG CHECK FAILED:" if strict else \

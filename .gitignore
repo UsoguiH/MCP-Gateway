@@ -42,3 +42,6 @@ mcp-gateway-dashboard/
 mcp-gateway-dashboard-v2/
 dashboard-ref/
 *.zip
+gateway/deploy/secrets/
+gateway/.env
+.env
