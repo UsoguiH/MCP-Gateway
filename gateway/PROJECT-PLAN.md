@@ -112,11 +112,18 @@ Sequenced by what unblocks what. Effort tags (S/M/L) are _build_ size; the IT te
 and decides, Claude Code does the hand-coding. **You don't have to build everything before real
 feedback:** a closed pilot with a handful of users can run right after Phase 1, before full HA.
 
-- **Phase 0 — Make it real, not a demo (START HERE, M).** Persistent DB + least-privilege role;
-  replace all dev secrets and flip production config flags; deploy mTLS terminator + real TLS;
+- **Phase 0 — Make it real, not a demo (✅ DONE 2026-07-06, M).** Persistent DB + least-privilege
+  role; replace all dev secrets and flip production config flags; deploy mTLS terminator + real TLS;
   push to self-hosted Gitea; enable backups.
   → _Done when: zero dev secrets in the running config, all traffic over TLS, boots clean under
   `MCP_ENV=production`, and the database survives a restart._
+  → **Verified 2026-07-06:** boots clean under `MCP_ENV=production` (tripwires are hard errors —
+  zero dev secrets); mTLS terminator live on :8443 (valid client cert → 200, no cert → rejected,
+  :8080 → 308 redirect, proxy bypass → 403); Postgres restart preserved data, gateway reconnects
+  as `mcp_login`→`mcp_app` (non-superuser); repo pushed to self-hosted Gitea; daily backups
+  scheduled 02:00 (`scripts/backup.ps1`: pg_dump + gw-data/gw-pki volumes + Gitea DB/repos,
+  14-day retention, restore-tested). Remaining caveat: backups are same-disk (D:) — move offsite
+  in Phase 2+; TLS material is the dev CA — swap for org PKI per the [P0] decision when answered.
 - **Phase 1 — Complete the connectors (M).** Build the internal-docs/file-share server; connect
   the DB and Git servers to real systems with least-privilege creds, each onboarded via the
   registry gate. → _Outcome: the AI can safely reach all three data sources._
@@ -134,10 +141,11 @@ feedback:** a closed pilot with a handful of users can run right after Phase 1, 
 - **Phase 5 — Harden & certify (M).** Independent pen test; DR site; HSM for keys if required;
   formal risk acceptance + compliance mapping. → _Outcome: production sign-off._
 
-## Do now (this week — all Phase 0)
+## Do now (this week — Phase 0 ✅ done, start Phase 1)
 
-1. **Stand up the real Postgres** — persistent volume, apply the least-privilege `mcp_app` role,
-   rewire the gateway to connect as it (off the throwaway container).
-2. **Push to Gitea** — repo is scanned/cleaned/committed; two commands once Gitea is up.
-3. **Put real security in front** — real certs, deploy the mTLS terminator, load real secrets,
-   flip production config so dev conveniences are off.
+1. **Build the internal-docs/file-share MCP server** — the missing third data source. Start
+   read-only against a local folder/SMB path with path allow-lists; widen deliberately.
+2. **Wire the DB + Git connectors to real systems** — least-privilege service accounts, onboard
+   each via the registry gate. (Blocked in part by the [P0–1] and [P1] decisions above.)
+3. **Single-user local-AI smoke test** — connect one real MCP client (employee zero) through
+   login → token → `/mcp` → tool call → approval hold, as the bridge toward the Phase 4 pilot.
