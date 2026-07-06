@@ -15,13 +15,16 @@ gateway (pure Policy-Enforcement-Point — the gateway runs no model); on-prem w
 internet; data sources = **PostgreSQL databases + Git repositories + internal documents/file
 shares**; operated by a **small IT team (2–4)**; built with Claude Code.
 
-## Where we are: ≈ 45% to real production
+## Where we are: two numbers
 
-The hard part is nearly done; the system around it is early. The **control-plane software**
-(the security engine) is ~90% complete and covered by 90+ automated tests. But a production
-system for a 300-person org is more than software — it is connectors + infrastructure +
-operations. Against that whole, we are a little under halfway. (It would be easy to call this
-"90% done" by looking only at the code; the code is 90%, the _system_ is ~45%.)
+- **Work to production ≈ 45%.** The control-plane software (the security engine) is ~90%
+  complete and covered by 90+ automated tests, but a production system for a 300-person org is
+  more than software — it is connectors + infrastructure + operations, and those are early.
+  (The _code_ is 90%; the _system_ is ~45%.)
+- **Plan maturity ≈ 90%** after this revision. The first draft had the destination, status and
+  roadmap but lacked a risk register, the external decisions we depend on, and measurable
+  targets — all added below. The last ~10% is the seven **Decisions we need from you**, which
+  only your org can answer; until then parts of Phases 0–3 can't start.
 
 | Layer | Status | Notes |
 |---|---:|---|
@@ -63,24 +66,68 @@ operations. Against that whole, we are a little under halfway. (It would be easy
 9. Client onboarding for staff (guide + config template).
 10. Independent penetration test + formal risk acceptance / compliance sign-off.
 
+## Risks we're carrying
+
+1. **The gateway trusts the person, not their AI model (residual, critical).** We authenticate
+   the employee, but their local model runs with that person's full clearance. A jailbroken or
+   backdoored model acts as them. Injection/taint defenses stop malicious _content_ and approval
+   tiers stop _destructive_ actions, but a compromised model doing _permitted_ reads within the
+   user's clearance is bounded only by ABAC, not prevented. **Mitigate:** tight least-privilege
+   clearances, stricter approval tiers on sensitive servers, per-session rate limits, anomaly
+   detection, and (future) an approved-model list / client attestation. This is the defining
+   residual risk of "bring your own AI" and must be **formally accepted**.
+2. **A docs/file-share connector can over-expose (Phase 1).** Pointed at a share it can surface
+   more than intended. **Mitigate:** read-only default, path allow-lists, clearance-gating, DLP
+   on results, per-share least-privilege account. Build narrow, widen deliberately.
+3. **Flat-file state races under concurrency (until Phase 2).** Concurrent writes to the
+   audit/approvals JSON files can race/corrupt — caps safe pilot size. **Mitigate:** keep the
+   early pilot small; DB migration is the fix.
+4. **Nobody owns data classification (dependency).** DLP masks known PII, but who decides which
+   tables/documents are Secret vs Restricted? **Mitigate:** assign a data steward; start
+   conservative (deny-up).
+5. **Arabic free-text PII blind spot (privacy).** DLP catches structured IDs/IBANs, not names or
+   addresses in Arabic prose. **Mitigate:** add an Arabic NER detector; mask conservatively meanwhile.
+6. **Small team + controlled-internet patching (operations).** 2–4 people carry key-person risk;
+   patches need a deliberate path. **Mitigate:** monthly patch window, CI dependency/vuln scanning,
+   runbooks so no one is irreplaceable.
+
+## Decisions we need from you
+
+I can build all of it, but not decide these — they depend on your environment and policy. Each
+blocks the phase in brackets; answering them is the last ~10% of plan maturity.
+
+- **[P0]** Which CA / PKI issues our certificates (server + per-workstation client certs), or do
+  we start with a self-signed internal CA?
+- **[P0–1]** Which PostgreSQL is the real system-of-record, and can we get a dedicated
+  least-privilege service account (not superuser)?
+- **[P1]** Where do the internal documents live — Windows/SMB shares, SharePoint, NFS, or a DMS?
+- **[P1]** Who owns data classification (which tables/documents are which sensitivity)?
+- **[P2]** What hardware for HA — 2+ Linux nodes + load balancer, and later a DR site?
+- **[P3]** Which SIEM receives the audit stream — Wazuh, OpenSearch, Splunk, Sentinel?
+- **[P5]** Is an HSM required for key custody, or is a software secret store acceptable at launch?
+
 ## Roadmap — six phases (dependency order)
 
 Sequenced by what unblocks what. Effort tags (S/M/L) are _build_ size; the IT team operates
-and decides, Claude Code does the hand-coding.
+and decides, Claude Code does the hand-coding. **You don't have to build everything before real
+feedback:** a closed pilot with a handful of users can run right after Phase 1, before full HA.
 
 - **Phase 0 — Make it real, not a demo (START HERE, M).** Persistent DB + least-privilege role;
   replace all dev secrets and flip production config flags; deploy mTLS terminator + real TLS;
   push to self-hosted Gitea; enable backups.
-  → _Outcome: a real, hardened single-node deployment with no dev defaults._
+  → _Done when: zero dev secrets in the running config, all traffic over TLS, boots clean under
+  `MCP_ENV=production`, and the database survives a restart._
 - **Phase 1 — Complete the connectors (M).** Build the internal-docs/file-share server; connect
   the DB and Git servers to real systems with least-privilege creds, each onboarded via the
   registry gate. → _Outcome: the AI can safely reach all three data sources._
 - **Phase 2 — Scale & resilience (L).** Move gateway state into the DB; run 2+ instances behind
   a load balancer; load-test to 300+ and tune limits/timeouts/breaker.
-  → _Outcome: proven to carry the whole org, no single point of failure._
+  → _Done when: 300 concurrent sessions sustained within your latency budget, and killing one
+  gateway node drops zero sessions._
 - **Phase 3 — See & respond, SecOps (M).** Wire audit → SIEM; turn anomaly alerts into
   email/webhook notifications; audit retention + immutable store; incident runbooks +
-  kill-switch drill. → _Outcome: the team is told when something's wrong._
+  kill-switch drill. → _Done when: an induced brute-force shows up as a SIEM alert within
+  minutes, and a kill-switch drill completes clean._
 - **Phase 4 — Pilot, then roll out (S).** Onboard 10–20 staff with their local AI; measure
   latency, approval friction, false positives; expand department by department.
   → _Outcome: real users, tuned thresholds, repeatable onboarding._
