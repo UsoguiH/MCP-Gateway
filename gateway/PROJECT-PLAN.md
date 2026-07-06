@@ -124,9 +124,19 @@ feedback:** a closed pilot with a handful of users can run right after Phase 1, 
   scheduled 02:00 (`scripts/backup.ps1`: pg_dump + gw-data/gw-pki volumes + Gitea DB/repos,
   14-day retention, restore-tested). Remaining caveat: backups are same-disk (D:) — move offsite
   in Phase 2+; TLS material is the dev CA — swap for org PKI per the [P0] decision when answered.
-- **Phase 1 — Complete the connectors (M).** Build the internal-docs/file-share server; connect
-  the DB and Git servers to real systems with least-privilege creds, each onboarded via the
-  registry gate. → _Outcome: the AI can safely reach all three data sources._
+- **Phase 1 — Complete the connectors (✅ DONE 2026-07-06, M).** Build the internal-docs/file-share
+  server; connect the DB and Git servers to real systems with least-privilege creds, each onboarded
+  via the registry gate. → _Outcome: the AI can safely reach all three data sources._
+  → **Verified 2026-07-06:** `servers/files_server.py` (files-mcp) built — read-only, path
+  allow-lists with per-root NDMO classification, traversal/hidden-entry refusal, size+time
+  budgets, txt/md/docx (stdlib) + optional pdf/xlsx extraction; 21 dedicated tests incl.
+  traversal attacks; full suite 121 passed. Prod stack: `D:\Shares` mounted read-only (write
+  refused from container), 3 roots (public/restricted/secret); gitea-mcp now points at the real
+  self-hosted Gitea via Docker-secret token (full lifecycle test green against it); postgres-mcp
+  on appdb as `mcp_login→mcp_app` since Phase 0. All 6 files tools discovered tier-0 and held
+  **pending Risk-Board approval** in the registry (approve in the admin console to activate).
+  Caveats: Gitea token is currently an all-scope admin token — replace with a dedicated
+  machine account + scoped token; the org's system-of-record Postgres still awaits [P0–1].
 - **Phase 2 — Scale & resilience (L).** Move gateway state into the DB; run 2+ instances behind
   a load balancer; load-test to 300+ and tune limits/timeouts/breaker.
   → _Done when: 300 concurrent sessions sustained within your latency budget, and killing one
@@ -141,12 +151,11 @@ feedback:** a closed pilot with a handful of users can run right after Phase 1, 
 - **Phase 5 — Harden & certify (M).** Independent pen test; DR site; HSM for keys if required;
   formal risk acceptance + compliance mapping. → _Outcome: production sign-off._
 
-## Do now (this week — Phase 0 ✅ done, start Phase 1)
+## Do now (Phase 0 ✅ + Phase 1 ✅ done — next: client access layer)
 
-1. **Build the internal-docs/file-share MCP server** — the missing third data source. Start
-   read-only against a local folder/SMB path with path allow-lists; widen deliberately.
-2. **Wire the DB + Git connectors to real systems** — least-privilege service accounts, onboard
-   each via the registry gate. (Blocked in part by the [P0–1] and [P1] decisions above.)
+1. **Approve the files-mcp tools in the admin console** (they sit `pending` per governance),
+   then spot-check a `files__search_content` call end-to-end through `/mcp`.
+2. **Swap the Gitea token for a dedicated machine account + scoped token** (least privilege).
 3. **Client access layer (pulled forward from Phase 4 — build right after the docs connector).**
    The pilot depends on easy onboarding, so this comes before Phase 2:
    - **MCP OAuth 2.1 authorization endpoints** on the gateway (~2–4 days): spec-compliant

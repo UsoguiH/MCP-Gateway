@@ -119,4 +119,15 @@ servers:
     env:
       GITEA_URL: "${GITEA_URL}"                  # e.g. http://localhost:3000
       GITEA_TOKEN: "${GITEA_TOKEN}"              # personal access token
+      GITEA_TOKEN_FILE: "${GITEA_TOKEN_FILE}"    # or a Docker secret file (wins)
+  - name: files
+    command: python
+    args: ["servers/files_server.py"]
+    env:
+      # JSON array of allow-listed document roots (read-only server):
+      #   [{"name":"policies","path":"/shares/policies","classification":"restricted"}]
+      DOCS_ROOTS: "${DOCS_ROOTS}"
+      DOCS_MAX_FILE_BYTES: "2000000"
+      DOCS_MAX_RESULTS: "50"
+      DOCS_SEARCH_MAX_FILES: "400"
 

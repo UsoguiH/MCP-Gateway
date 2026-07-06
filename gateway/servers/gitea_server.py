@@ -44,7 +44,22 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP("gitea")
 
 GITEA_URL = os.environ.get("GITEA_URL", "http://localhost:3000").rstrip("/")
-GITEA_TOKEN = os.environ.get("GITEA_TOKEN", "")
+
+
+def _token() -> str:
+    """GITEA_TOKEN_FILE (Docker secret) wins over GITEA_TOKEN — same file-first
+    convention as the gateway's own secrets."""
+    path = os.environ.get("GITEA_TOKEN_FILE", "").strip()
+    if path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read().strip()
+        except OSError:
+            return ""
+    return os.environ.get("GITEA_TOKEN", "")
+
+
+GITEA_TOKEN = _token()
 TIMEOUT = float(os.environ.get("GITEA_TIMEOUT", "30"))
 MAX_RESULT_BYTES = 1_000_000
 MAX_PAGE_LIMIT = 50

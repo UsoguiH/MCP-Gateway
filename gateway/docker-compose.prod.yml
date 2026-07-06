@@ -46,15 +46,30 @@ services:
       POSTGRES_URL: "postgresql://mcp_login:${MCP_APP_PASSWORD}@postgres:5432/appdb"
       POSTGRES_ROLE: "mcp_app"
       POSTGRES_APPNAME: "mcp-gateway"
+      # files-mcp (Phase 1): read-only document shares, mounted ro below.
+      DOCS_ROOTS: >-
+        [{"name":"public","path":"/shares/public","classification":"public",
+          "description":"Company-wide documents"},
+         {"name":"policies","path":"/shares/policies","classification":"restricted",
+          "description":"IT & HR policies"},
+         {"name":"hr","path":"/shares/hr","classification":"secret",
+          "description":"HR operations"}]
+      # gitea-mcp (Phase 1): the real self-hosted Gitea on the host.
+      GITEA_URL: "http://host.docker.internal:3000"
+      GITEA_TOKEN_FILE: /run/secrets/gitea_token
     secrets:
       - kek
       - audit_key
       - vault_key
       - mfa_key
       - proxy_secret
+      - gitea_token
     volumes:
       - gw-data:/app/data
       - gw-pki:/app/pki
+      - D:/Shares:/shares:ro     # files-mcp document roots — read-only mount
+    extra_hosts:
+      - "host.docker.internal:host-gateway"   # reach the host's Gitea (:3000)
     expose:
       - "8800"
     # --proxy-headers: trust X-Forwarded-* from the terminator so the gateway logs
@@ -88,6 +103,7 @@ secrets:
   mfa_key:         { file: ./deploy/secrets/mfa_key }
   proxy_secret:    { file: ./deploy/secrets/proxy_secret }
   pg_superuser_pw: { file: ./deploy/secrets/pg_superuser_pw }
+  gitea_token:     { file: ./deploy/secrets/gitea_token }
 
 volumes:
   pgdata:
