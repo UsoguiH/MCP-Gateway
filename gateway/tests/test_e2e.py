@@ -119,33 +119,38 @@ def test_cert_login_and_bad_proof_rejected():
     assert r.status_code == 401
 
 
-def test_password_login_and_rejections():
-    # MFA is enforced (auth.require_mfa: true): enroll a TOTP authenticator for the
-    # demo operator (shared data/ dir — the running gateway reads it per-verify).
+def test_two_layer_login_and_rejections():
+    # Two layers: (1) username+password, then (2) TOTP with the layer-1 ticket.
     auth.enroll_totp("sara")
-    # correct password but NO authenticator code -> 401 (second factor enforced)
+
+    # --- Layer 1 rejections: wrong password / unknown user never advance to MFA ---
+    bad = httpx.post(f"{BASE}/api/auth/login",
+                     json={"username": "sara", "password": "not-the-password-9!"})
+    assert bad.status_code == 401 and "mfa_ticket" not in bad.json()
     assert httpx.post(f"{BASE}/api/auth/login",
-                      json={"username": "sara", "password": DEMO_PW["sara"]}).status_code == 401
-    # correct password + WRONG code -> 401
-    assert httpx.post(f"{BASE}/api/auth/login",
-                      json={"username": "sara", "password": DEMO_PW["sara"],
-                            "otp": "000000"}).status_code == 401
-    # correct username + strong password + valid TOTP -> bound session token
-    good = httpx.post(f"{BASE}/api/auth/login",
-                      json={"username": "sara", "password": DEMO_PW["sara"],
-                            "otp": auth.totp_code("sara")})
+                      json={"username": "ghost", "password": "whatever-1234!"}).status_code == 401
+
+    # --- Layer 1 success -> ticket, NO session token yet ---
+    l1 = httpx.post(f"{BASE}/api/auth/login",
+                    json={"username": "sara", "password": DEMO_PW["sara"]})
+    assert l1.status_code == 200 and l1.json()["mfa_required"] is True
+    ticket = l1.json()["mfa_ticket"]
+    assert "token" not in l1.json()                       # password alone does NOT sign you in
+
+    # --- Layer 2: wrong code -> 401; can't reach the session without the real code ---
+    assert httpx.post(f"{BASE}/api/auth/mfa",
+                      json={"mfa_ticket": ticket, "otp": "000000"}).status_code == 401
+    # a forged/garbage ticket -> 401 (layer 1 cannot be skipped)
+    assert httpx.post(f"{BASE}/api/auth/mfa",
+                      json={"mfa_ticket": "not-a-real-ticket", "otp": auth.totp_code("sara")}).status_code == 401
+
+    # --- Layer 2 success -> bound session token ---
+    good = httpx.post(f"{BASE}/api/auth/mfa",
+                      json={"mfa_ticket": ticket, "otp": auth.totp_code("sara")})
     assert good.status_code == 200 and good.json()["user"]["sub"] == "sara"
-    assert "otp" in good.json()["user"].get("amr", ["otp"]) or True   # amr carries the factor
     tok, thumb = good.json()["token"], good.json()["thumbprint"]
     assert httpx.get(f"{BASE}/api/me", headers={"Authorization": f"Bearer {tok}",
                                                 "X-Client-Cert-Thumbprint": thumb}).status_code == 200
-    # wrong password -> 401 (generic message, no oracle)
-    assert httpx.post(f"{BASE}/api/auth/login",
-                      json={"username": "sara", "password": "not-the-password-9!",
-                            "otp": auth.totp_code("sara")}).status_code == 401
-    # unknown user -> 401 (no user enumeration)
-    assert httpx.post(f"{BASE}/api/auth/login",
-                      json={"username": "ghost", "password": "whatever-1234!"}).status_code == 401
 
 
 def test_token_is_two_factor_and_cert_bound():
@@ -278,12 +283,14 @@ def test_anti_hammering_lockout_and_admin_unlock():
     locked = httpx.post(f"{BASE}/api/auth/login",
                         json={"username": "noura", "password": DEMO_PW["noura"]})
     assert locked.status_code == 429                       # locked out even with the right password
-    # admin clears the lockout -> login works again (MFA enforced: enroll + send code)
+    # admin clears the lockout -> login works again (two-layer: password then MFA)
     httpx.post(f"{BASE}/api/admin/unlock", headers=h(admin), json={"sub": "noura"})
     auth.enroll_totp("noura")
-    ok = httpx.post(f"{BASE}/api/auth/login",
-                    json={"username": "noura", "password": DEMO_PW["noura"],
-                          "otp": auth.totp_code("noura")})
+    l1 = httpx.post(f"{BASE}/api/auth/login",
+                    json={"username": "noura", "password": DEMO_PW["noura"]})
+    assert l1.status_code == 200
+    ok = httpx.post(f"{BASE}/api/auth/mfa",
+                    json={"mfa_ticket": l1.json()["mfa_ticket"], "otp": auth.totp_code("noura")})
     assert ok.status_code == 200
 
 

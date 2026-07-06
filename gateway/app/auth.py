@@ -393,6 +393,70 @@ def authenticate_password(username: str, password: str, otp: str = "",
     return _mint_session(username, amr)
 
 
+# ---------- two-layer sign-in: password (layer 1) THEN TOTP (layer 2) ----------
+# Layer 1 is verified before the client is ever shown the MFA step, so a wrong
+# username/password is rejected immediately and never advances to layer 2. Layer 2
+# requires a short-lived ticket that is only issued when layer 1 passed, so the
+# password step cannot be skipped.
+_MFA_TICKET_TTL = int(_A.get("challenge_ttl_seconds", 120))
+
+
+def verify_password_layer(username: str, password: str) -> bool:
+    """Layer 1: verify username + password only (no token, no MFA). Constant-time;
+    a wrong password feeds the anti-hammering lockout. Fails-closed for unknown,
+    revoked, or locked identities."""
+    u = USERS.get(username)
+    if not u or username in _revoked_subjects or locked(username):
+        verify_password(password or "", _DUMMY_HASH)     # flatten user-enumeration timing
+        return False
+    stored = u.get("pwd_hash")
+    if not stored or not verify_password(password, stored):
+        _record_fail(username)
+        return False
+    return True
+
+
+def issue_mfa_ticket(username: str) -> str:
+    """Short-lived proof that layer 1 (password) passed. Required to attempt layer 2."""
+    now = int(time.time())
+    claims = {"iss": _ISSUER, "aud": _AUDIENCE, "sub": username, "purpose": "mfa",
+              "iat": now, "nbf": now, "exp": now + _MFA_TICKET_TTL, "jti": uuid.uuid4().hex}
+    return jwt.encode(claims, pki.signing_key(), algorithm=_ALG)
+
+
+def verify_mfa_ticket(ticket: str) -> str | None:
+    """Validate a layer-1 ticket; return the username it authorizes, or None."""
+    try:
+        c = jwt.decode(ticket, pki.signing_public_pem(), algorithms=[_ALG],
+                       issuer=_ISSUER, audience=_AUDIENCE, leeway=_LEEWAY,
+                       options={"require": ["exp", "iat", "nbf", "sub", "purpose", "jti"]})
+    except jwt.PyJWTError:
+        return None
+    if c.get("purpose") != "mfa":
+        return None
+    return c["sub"]
+
+
+def complete_mfa(username: str, otp: str) -> tuple[str, str] | None:
+    """Layer 2: for a password-verified user, verify the TOTP code and mint the
+    session. A wrong code feeds the lockout."""
+    if username not in USERS or username in _revoked_subjects or locked(username):
+        return None
+    if not verify_totp(username, otp):
+        _record_fail(username)
+        return None
+    _clear_fails(username)
+    return _mint_session(username, ["pwd", "otp"])
+
+
+def finish_password_only(username: str) -> tuple[str, str] | None:
+    """When MFA is disabled: mint the session right after layer 1."""
+    if username not in USERS:
+        return None
+    _clear_fails(username)
+    return _mint_session(username, ["pwd"])
+
+
 def _mint_session(username: str, amr: list[str],
                   pwd_change_required: bool | None = None) -> tuple[str, str]:
     """Mint a short-lived ES256 session token bound to a per-session secret the

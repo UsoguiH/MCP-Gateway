@@ -66,14 +66,35 @@ export async function quickLogin(): Promise<User> {
   return data.user as User;
 }
 
-export async function login(username: string, password: string, otp: string): Promise<User> {
+// Layer 1: username + password. A wrong password throws here (never advances to
+// MFA). Returns either a completed User (when MFA is off) or an mfa_ticket to
+// carry into layer 2.
+export type LoginResult =
+  | { user: User }
+  | { mfaTicket: string; username: string };
+
+export async function login(username: string, password: string): Promise<LoginResult> {
   const r = await fetch("/api/auth/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ username, password, otp }),
+    body: JSON.stringify({ username, password }),
   });
   const data = await r.json().catch(() => ({}));
   if (!r.ok) throw new ApiError(r.status, data.detail || "Sign in failed");
+  if (data.mfa_required) return { mfaTicket: data.mfa_ticket, username: data.username };
+  store(data.token, data.thumbprint, data.user);
+  return { user: data.user as User };
+}
+
+// Layer 2: TOTP code + the ticket from layer 1. Completes the session.
+export async function verifyMfa(mfaTicket: string, otp: string): Promise<User> {
+  const r = await fetch("/api/auth/mfa", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mfa_ticket: mfaTicket, otp }),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new ApiError(r.status, data.detail || "Verification failed");
   store(data.token, data.thumbprint, data.user);
   return data.user as User;
 }

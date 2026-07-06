@@ -149,8 +149,12 @@ class DevLoginReq(BaseModel):
 
 class AuthLoginReq(BaseModel):
     username: str
-    password: str
-    otp: str = ""            # TOTP authenticator code — required only when auth.require_mfa
+    password: str            # layer 1 — verified before MFA is ever offered
+
+
+class MfaReq(BaseModel):
+    mfa_ticket: str          # proof that layer 1 (password) passed
+    otp: str                 # layer 2 — TOTP authenticator code
 
 
 class KillReq(BaseModel):
@@ -206,15 +210,43 @@ def login(req: LoginReq):
 
 @app.post("/api/auth/login")
 def auth_login(req: AuthLoginReq):
-    """Production sign-in: username + strong password (+ TOTP MFA when auth.require_mfa).
-    Salted PBKDF2 verification, constant-time, with anti-hammering lockout."""
+    """Layer 1 — username + strong password (salted PBKDF2, constant-time, anti-
+    hammering). A wrong username/password is rejected HERE and never advances to MFA.
+    On success, if MFA is required, returns a short-lived mfa_ticket for layer 2
+    (no session token yet); otherwise mints the session directly."""
     if auth.locked(req.username):
         audit.record("login_locked_out", user=req.username)
         raise HTTPException(429, "Too many failed attempts. This account is temporarily locked — try again shortly.")
-    got = auth.authenticate_password(req.username, req.password, req.otp)
-    if not got:
-        audit.record("login_failed", user=req.username, locked=auth.locked(req.username))
+    if not auth.verify_password_layer(req.username, req.password):
+        audit.record("login_failed", user=req.username, stage="password",
+                     locked=auth.locked(req.username))
         raise HTTPException(401, "Incorrect username or password.")
+    # password ok
+    if CONFIG["auth"].get("require_mfa", False):
+        audit.record("login_password_ok", user=req.username)
+        return {"mfa_required": True, "mfa_ticket": auth.issue_mfa_ticket(req.username),
+                "username": req.username}
+    got = auth.finish_password_only(req.username)
+    token, binding = got
+    claims = verify(token, binding)
+    audit.record("login", user=claims["sub"], role=claims["role"], amr=claims["amr"], acr=claims["acr"])
+    return {"token": token, "thumbprint": binding, "user": _user_view(claims)}
+
+
+@app.post("/api/auth/mfa")
+def auth_mfa(req: MfaReq):
+    """Layer 2 — TOTP. Requires a valid mfa_ticket from layer 1 (so the password step
+    cannot be skipped). A wrong code feeds the same anti-hammering lockout."""
+    username = auth.verify_mfa_ticket(req.mfa_ticket)
+    if not username:
+        raise HTTPException(401, "Your sign-in step expired. Enter your username and password again.")
+    if auth.locked(username):
+        audit.record("login_locked_out", user=username)
+        raise HTTPException(429, "Too many failed attempts. This account is temporarily locked — try again shortly.")
+    got = auth.complete_mfa(username, req.otp)
+    if not got:
+        audit.record("login_mfa_failed", user=username, locked=auth.locked(username))
+        raise HTTPException(401, "Incorrect authenticator code.")
     token, binding = got
     claims = verify(token, binding)
     audit.record("login", user=claims["sub"], role=claims["role"], amr=claims["amr"], acr=claims["acr"],

@@ -45,3 +45,7 @@ dashboard-ref/
 gateway/deploy/secrets/
 gateway/.env
 .env
+
+# MFA QR (contains the TOTP seed — never commit)
+admin-mfa-qr.png
+*mfa-qr*.png

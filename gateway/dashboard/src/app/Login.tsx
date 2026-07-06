@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Eye, EyeOff, KeyRound, ShieldCheck, LogOut } from "lucide-react";
-import { login, quickLogin, changePassword, authInfo, type User } from "@/api";
+import { login, verifyMfa, quickLogin, changePassword, authInfo, type User } from "@/api";
 
 // Exact styling ported from Login-page.txt (green RTL, glass inputs, entrance
 // animation), centered with no side panel, wired to the real 2FA flow.
@@ -22,25 +22,38 @@ export function LoginScreen({ onDone }: { onDone: (u: User) => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [otp, setOtp] = useState("");
+  const [mfaTicket, setMfaTicket] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [mfa, setMfa] = useState(true);
   const [quick, setQuick] = useState(false);
   const [err, setErr] = useState("");
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => { authInfo().then((i) => { setMfa(i.mfa_required !== false); setQuick(!!i.dev_quick_login); }); }, []);
+  useEffect(() => { authInfo().then((i) => { setQuick(!!i.dev_quick_login); }); }, []);
 
-  const submit = async () => {
-    setErr(""); setBusy(true);
-    try { onDone(await login(username, password, otp)); }
-    catch (e: any) { setErr(e.message || "تعذّر تسجيل الدخول"); }
-    finally { setBusy(false); }
-  };
-  const onSignIn = (e: React.FormEvent) => {
+  // Layer 1: verify username + password. A wrong password stops here — we only
+  // advance to the MFA step when the password is confirmed.
+  const onSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!username || !password) { setErr("أدخل اسم المستخدم وكلمة المرور."); return; }
-    if (mfa) { setErr(""); setStep("otp"); } else submit();
+    setErr(""); setBusy(true);
+    try {
+      const res = await login(username, password);
+      if ("user" in res) { onDone(res.user); }             // MFA disabled — done
+      else { setMfaTicket(res.mfaTicket); setStep("otp"); } // advance to layer 2
+    } catch (e: any) { setErr(e.message || "اسم المستخدم أو كلمة المرور غير صحيحة."); }
+    finally { setBusy(false); }
+  };
+  // Layer 2: verify the TOTP code with the ticket from layer 1.
+  const submit = async () => {
+    if (otp.trim().length < 6) { setErr("أدخل الرمز المكوّن من 6 أرقام."); return; }
+    setErr(""); setBusy(true);
+    try { onDone(await verifyMfa(mfaTicket, otp)); }
+    catch (e: any) {
+      setErr(e.message || "رمز غير صحيح");
+      if (/expired|expire|أدخل اسم/.test(e.message || "")) { setStep("creds"); setOtp(""); setMfaTicket(""); }
+    }
+    finally { setBusy(false); }
   };
   const enterNow = async () => {
     setErr(""); setBusy(true);
