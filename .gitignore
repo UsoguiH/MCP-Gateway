@@ -49,3 +49,8 @@ gateway/.env
 # MFA QR (contains the TOTP seed — never commit)
 admin-mfa-qr.png
 *mfa-qr*.png
+*aegis-qr*.png
+*-qr.png
+
+# Runtime state & generated report output (never commit)
+gateway/data/

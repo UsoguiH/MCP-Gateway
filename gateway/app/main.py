@@ -66,9 +66,14 @@ async def edge_guard(request: Request, call_next):
     clen = request.headers.get("content-length")
     if clen and clen.isdigit() and int(clen) > _MAX_BODY:
         return JSONResponse({"detail": "request too large"}, status_code=413)
-    # L1: Origin validation (MCP spec MUST — DNS-rebinding defense)
+    # L1: Origin validation (MCP spec MUST — DNS-rebinding defense). Scoped to the
+    # API/MCP surface: the OAuth browser flow (/oauth/*), the connect page and the
+    # public metadata are browser-facing and legitimately carry varied Origins; they
+    # are protected instead by PKCE + the login itself, so exempt them here.
+    _origin_exempt = request.url.path.startswith(("/oauth/", "/connect", "/.well-known/"))
     origin = request.headers.get("origin")
-    if origin and "*" not in _ALLOWED_ORIGINS and origin not in _ALLOWED_ORIGINS:
+    if origin and not _origin_exempt and "*" not in _ALLOWED_ORIGINS \
+            and origin not in _ALLOWED_ORIGINS:
         return JSONResponse({"detail": "invalid origin"}, status_code=403)
     # M1/M5: per-IP rate limit on authentication endpoints
     if request.url.path.startswith(("/api/login", "/api/dev/login")):

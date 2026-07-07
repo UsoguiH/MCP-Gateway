@@ -131,6 +131,12 @@ servers:
       GITEA_URL: "${GITEA_URL}"                  # e.g. http://localhost:3000
       GITEA_TOKEN: "${GITEA_TOKEN}"              # personal access token
       GITEA_TOKEN_FILE: "${GITEA_TOKEN_FILE}"    # or a Docker secret file (wins)
+  - name: reports
+    command: python
+    args: ["servers/reports_server.py"]
+    env:
+      POSTGRES_URL: "${POSTGRES_URL}"           # same DB the postgres server reads
+      REPORTS_DIR: "data/reports"
   - name: files
     command: python
     args: ["servers/files_server.py"]
