@@ -54,3 +54,6 @@ admin-mfa-qr.png
 
 # Runtime state & generated report output (never commit)
 gateway/data/
+
+# opendata-mcp is its own repository (gitea: adel/open-data-mcp) — not a submodule
+opendata-mcp/
