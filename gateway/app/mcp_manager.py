@@ -11,14 +11,43 @@ server), chosen per server in config (`transport: stdio|http`, with `url` for ht
 The authorization / HITL / DLP / audit layers above this module are transport-agnostic.
 """
 import asyncio
+import json
 import os
 import sys
+import time
 from contextlib import AsyncExitStack
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-from .config import CONFIG, ROOT
+from .config import CONFIG, DATA_DIR, ROOT
+
+# Admin-managed server inventory overlay (survives restarts): servers added or
+# removed from the dashboard without editing config.yaml.
+#   {"added": [spec, ...], "removed": ["name", ...]}
+_DYN_FILE = DATA_DIR / "servers_dynamic.json"
+
+
+def _read_dynamic() -> dict:
+    try:
+        d = json.loads(_DYN_FILE.read_text(encoding="utf-8"))
+        return {"added": list(d.get("added", [])), "removed": list(d.get("removed", []))}
+    except Exception:
+        return {"added": [], "removed": []}
+
+
+def _write_dynamic(d: dict):
+    _DYN_FILE.write_text(json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def effective_server_specs() -> list[dict]:
+    """config.yaml servers, minus admin-removed, plus admin-added."""
+    dyn = _read_dynamic()
+    removed = set(dyn["removed"])
+    specs = [s for s in CONFIG["servers"] if s["name"] not in removed]
+    names = {s["name"] for s in specs}
+    specs += [s for s in dyn["added"] if s["name"] not in names and s["name"] not in removed]
+    return specs
 
 
 def _split_content(content) -> tuple[str, list[dict]]:
@@ -58,6 +87,8 @@ class ManagedServer:
         self.prompts: list[dict] = []
         self._stack: AsyncExitStack | None = None
         self._lock = asyncio.Lock()
+        self.state = "stopped"            # running | stopped (admin lifecycle)
+        self.started_at: float | None = None
 
     async def _connect(self):
         self._stack = AsyncExitStack()
@@ -98,6 +129,8 @@ class ManagedServer:
 
     async def start(self):
         await self._connect()
+        self.state = "running"
+        self.started_at = time.time()
 
     async def _restart(self):
         try:
@@ -107,11 +140,21 @@ class ManagedServer:
             pass
         self._stack = self.session = None
         await self._connect()
+        self.state = "running"
+        self.started_at = time.time()
+
+    async def restart(self):
+        """Admin restart: reconnect + rediscover under the per-server lock."""
+        async with self._lock:
+            await self._restart()
 
     async def _op(self, factory):
         """Run one operation under the per-server lock; on failure, restart the
-        server once (reconnect + rediscover) and retry. Persistent failure raises."""
+        server once (reconnect + rediscover) and retry. Persistent failure raises.
+        An admin-stopped server fails immediately and is NOT auto-restarted."""
         async with self._lock:
+            if self.state != "running":
+                raise RuntimeError(f"server {self.name!r} is stopped by an administrator")
             try:
                 return await factory()
             except Exception:
@@ -141,9 +184,19 @@ class ManagedServer:
                 "messages": [m.model_dump(mode="json", exclude_none=True) for m in result.messages]}
 
     async def stop(self):
+        self.state = "stopped"
         if self._stack:
-            await self._stack.aclose()
-            self._stack = None
+            try:
+                await self._stack.aclose()
+            except Exception:
+                pass                        # anyio cross-task close; connection is dropped anyway
+            self._stack = self.session = None
+
+
+def _make_server(spec: dict) -> "ManagedServer":
+    return ManagedServer(spec["name"], spec.get("command"), spec.get("args", []),
+                         transport=spec.get("transport", "stdio"), url=spec.get("url"),
+                         env=spec.get("env"))
 
 
 class MCPManager:
@@ -151,16 +204,63 @@ class MCPManager:
         self.servers: dict[str, ManagedServer] = {}
 
     async def start_all(self):
-        for spec in CONFIG["servers"]:
-            srv = ManagedServer(spec["name"], spec.get("command"), spec.get("args", []),
-                                transport=spec.get("transport", "stdio"), url=spec.get("url"),
-                                env=spec.get("env"))
+        for spec in effective_server_specs():
+            srv = _make_server(spec)
             await srv.start()
             self.servers[srv.name] = srv
 
     async def stop_all(self):
         for srv in self.servers.values():
             await srv.stop()
+
+    # ---- admin lifecycle -------------------------------------------------
+    def _get(self, name: str) -> ManagedServer:
+        srv = self.servers.get(name)
+        if not srv:
+            raise KeyError(f"unknown server {name}")
+        return srv
+
+    async def restart_server(self, name: str):
+        await self._get(name).restart()
+
+    async def stop_server(self, name: str):
+        await self._get(name).stop()
+
+    async def start_server(self, name: str):
+        srv = self._get(name)
+        async with srv._lock:
+            if srv.state == "running":
+                return
+            await srv._restart()
+
+    async def add_server(self, spec: dict) -> "ManagedServer":
+        """Connect a new server and persist it to the dynamic inventory. Rolls the
+        inventory back if the server fails to start, so a bad spec can't wedge boot."""
+        name = spec.get("name") or ""
+        if not name or "__" in name:
+            raise ValueError("server name is required and must not contain '__'")
+        if name in self.servers:
+            raise ValueError(f"server {name!r} already exists")
+        srv = _make_server(spec)
+        await srv.start()                                # raises on a bad spec
+        dyn = _read_dynamic()
+        dyn["removed"] = [n for n in dyn["removed"] if n != name]
+        dyn["added"] = [s for s in dyn["added"] if s.get("name") != name] + [spec]
+        _write_dynamic(dyn)
+        self.servers[name] = srv
+        return srv
+
+    async def remove_server(self, name: str):
+        """Disconnect a server and persist its removal (works for config.yaml
+        servers too — they stay removed across restarts until re-added)."""
+        srv = self._get(name)
+        await srv.stop()
+        self.servers.pop(name, None)
+        dyn = _read_dynamic()
+        dyn["added"] = [s for s in dyn["added"] if s.get("name") != name]
+        if name not in dyn["removed"]:
+            dyn["removed"].append(name)
+        _write_dynamic(dyn)
 
     def all_tools(self) -> list[dict]:
         return [t for srv in self.servers.values() for t in srv.tools]

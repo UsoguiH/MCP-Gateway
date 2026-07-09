@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Connect your AI — Secure MCP Gateway</title>
+<style>
+  :root{
+    --bg:#0f1720; --card:#1a2330; --line:#2a3644; --ink:#e8ecf0; --muted:#9fb0c0;
+    --accent:#2f81f7; --ok:#2ea043; --code:#0c141d; color-scheme:dark;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--ink);line-height:1.55}
+  .wrap{max-width:760px;margin:0 auto;padding:40px 22px 80px}
+  h1{font-size:26px;margin:0 0 4px}
+  .lede{color:var(--muted);font-size:15px;margin:0 0 28px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px;margin:16px 0}
+  h2{font-size:17px;margin:0 0 6px;display:flex;align-items:center;gap:9px}
+  .step{font-size:12px;font-weight:700;background:var(--accent);color:#fff;border-radius:50%;
+        width:24px;height:24px;display:inline-grid;place-items:center;flex:none}
+  .muted{color:var(--muted);font-size:13.5px;margin:2px 0 0}
+  label{display:block;font-size:12.5px;color:var(--muted);font-weight:600;margin:14px 0 0}
+  input{width:100%;margin-top:6px;padding:11px 13px;font-size:15px;border-radius:9px;
+        border:1px solid #33414f;background:#0f1720;color:var(--ink)}
+  input:focus{outline:2px solid var(--accent);border-color:var(--accent)}
+  button{margin-top:18px;padding:11px 18px;font-size:14.5px;font-weight:600;border:0;border-radius:9px;
+         background:var(--accent);color:#fff;cursor:pointer}
+  button.ghost{background:transparent;border:1px solid #33414f;color:var(--ink)}
+  button:hover{filter:brightness(1.08)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+      overflow-x:auto;font-family:Consolas,"Cascadia Mono",monospace;font-size:12.5px;margin:12px 0 0}
+  code{font-family:Consolas,"Cascadia Mono",monospace}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .pill{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;border-radius:999px;
+        padding:5px 12px;border:1px solid var(--line);color:var(--muted)}
+  .dot{width:9px;height:9px;border-radius:50%;background:#5b6b7b}
+  .dot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(46,160,67,.2)}
+  .err{background:#3a1720;border:1px solid #6b2434;color:#ffb3bf;padding:10px 12px;border-radius:9px;
+       font-size:13px;margin-top:12px}
+  .warn{color:#e3b341;font-size:12.5px;margin-top:10px}
+  .hide{display:none}
+  .tabs{display:flex;gap:8px;margin-bottom:4px}
+  .tab{padding:8px 14px;border-radius:9px 9px 0 0;border:1px solid var(--line);border-bottom:0;
+       background:transparent;color:var(--muted);cursor:pointer;font-size:13.5px}
+  .tab.active{background:var(--card);color:var(--ink)}
+  a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Connect your AI</h1>
+  <p class="lede">Point your local AI assistant at the secure gateway. It will reach internal
+    databases, code and documents <b>as you</b> — every action authorized, masked and audited.</p>
+
+  <!-- Sign in -->
+  <div class="card" id="login-card">
+    <h2><span class="step">1</span> Sign in</h2>
+    <p class="muted">Same account you use for the gateway console.</p>
+    <label>Username<input id="u" autocomplete="username" autofocus></label>
+    <label>Password<input id="p" type="password" autocomplete="current-password"></label>
+    <label id="otp-label" class="hide">Authenticator code (MFA)<input id="otp" inputmode="numeric" pattern="[0-9]*" placeholder="123456"></label>
+    <div id="login-err" class="err hide"></div>
+    <button id="login-btn">Sign in</button>
+  </div>
+
+  <!-- Connected status + instructions -->
+  <div id="app" class="hide">
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div><b id="who"></b><div class="muted">signed in</div></div>
+        <span class="pill"><span class="dot" id="live-dot"></span><span id="live-text">checking…</span></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2><span class="step">2</span> Choose how your AI connects</h2>
+      <div class="tabs" role="tablist">
+        <button class="tab active" id="tab-oauth" onclick="showTab('oauth')">Automatic (recommended)</button>
+        <button class="tab" id="tab-manual" onclick="showTab('manual')">Manual token</button>
+      </div>
+
+      <!-- OAuth path -->
+      <div id="pane-oauth" class="card" style="margin:0;border-radius:0 10px 10px 10px">
+        <p class="muted">For clients that support MCP sign-in (e.g. Claude Code). Add the gateway once;
+          a browser window opens for you to sign in, and the token is handled and refreshed for you —
+          nothing to copy.</p>
+        <p class="muted" style="margin-top:12px"><b>Claude Code</b></p>
+        <pre id="oauth-cli">claude mcp add --transport http company-gateway <span id="mcpurl1"></span></pre>
+        <p class="muted" style="margin-top:12px"><b>Other MCP clients</b> — add an HTTP MCP server with this URL and choose “sign in / OAuth” when prompted:</p>
+        <pre id="oauth-url"></pre>
+      </div>
+
+      <!-- Manual path -->
+      <div id="pane-manual" class="card hide" style="margin:0;border-radius:0 10px 10px 10px">
+        <p class="muted">For clients that only accept a fixed token in their config file. Generate one below
+          and paste the snippet into your client. The token is tied to your account and expires — regenerate
+          when it does.</p>
+        <label>Label (which client is this for?)<input id="label" placeholder="LM Studio on my laptop"></label>
+        <button id="gen-btn">Generate connection token</button>
+        <div id="gen-err" class="err hide"></div>
+        <div id="gen-out" class="hide">
+          <p class="muted" style="margin-top:16px">Paste this into your MCP client config:</p>
+          <pre id="config-json"></pre>
+          <div class="row">
+            <button class="ghost" id="copy-btn">Copy config</button>
+            <span class="muted" id="expiry"></span>
+          </div>
+          <p class="warn">⚠ Treat this token like a password — anyone with it can act as you until it expires. It is shown once.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2><span class="step">3</span> Confirm it works</h2>
+      <p class="muted">Once your AI connects, this indicator turns green. Then just ask your assistant to
+        use a tool — for example “list the shares I can read” — and watch it flow through the gateway.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+  let TOKEN = null, THUMB = null, MCPURL = location.origin + "/mcp";
+
+  const $ = (id) => document.getElementById(id);
+  const show = (el, on) => el.classList.toggle("hide", !on);
+
+  async function api(path, opts){
+    opts = opts || {};
+    opts.headers = Object.assign({}, opts.headers, {"Content-Type":"application/json"});
+    if (TOKEN){ opts.headers["Authorization"] = "Bearer " + TOKEN;
+                opts.headers["X-Client-Cert-Thumbprint"] = THUMB || ""; }
+    const r = await fetch(path, opts);
+    const t = await r.text();
+    let j = {}; try { j = t ? JSON.parse(t) : {}; } catch(e){ j = {detail:t}; }
+    if (!r.ok) throw new Error(j.detail || j.error_description || ("HTTP " + r.status));
+    return j;
+  }
+
+  // Detect whether MFA is required so we show the code field.
+  fetch("/api/auth/info").then(r=>r.json()).then(d=>{
+    if (d && d.mfa_required) show($("otp-label"), true);
+  }).catch(()=>{});
+
+  $("login-btn").onclick = async function(){
+    show($("login-err"), false);
+    const u = $("u").value.trim(), p = $("p").value, otp = $("otp").value.trim();
+    if (!u || !p){ return fail("Enter your username and password."); }
+    try {
+      const step1 = await api("/api/auth/login", {method:"POST", body:JSON.stringify({username:u,password:p})});
+      let auth = step1;
+      if (step1.mfa_required){
+        if (!otp){ return fail("Enter your authenticator code."); }
+        auth = await api("/api/auth/mfa", {method:"POST",
+                 body:JSON.stringify({mfa_ticket: step1.mfa_ticket, otp})});
+      }
+      TOKEN = auth.token; THUMB = auth.thumbprint;
+      $("who").textContent = auth.user.name + " (" + auth.user.role + ")";
+      show($("login-card"), false); show($("app"), true);
+      pollStatus(); setInterval(pollStatus, 4000);
+    } catch(e){ fail(e.message); }
+  };
+  function fail(msg){ $("login-err").textContent = msg; show($("login-err"), true); }
+
+  window.showTab = function(which){
+    const oauth = which === "oauth";
+    $("tab-oauth").classList.toggle("active", oauth);
+    $("tab-manual").classList.toggle("active", !oauth);
+    show($("pane-oauth"), oauth); show($("pane-manual"), !oauth);
+  };
+
+  async function pollStatus(){
+    try {
+      const s = await api("/api/connect/status");
+      MCPURL = location.origin + (s.mcp_url_path || "/mcp");
+      $("mcpurl1").textContent = MCPURL;
+      $("oauth-url").textContent = MCPURL;
+      $("live-dot").classList.toggle("on", s.connected);
+      $("live-text").textContent = s.connected
+        ? (s.sessions + " AI client" + (s.sessions>1?"s":"") + " connected")
+        : "No AI connected yet";
+    } catch(e){ /* token expired: silent */ }
+  }
+
+  $("gen-btn").onclick = async function(){
+    show($("gen-err"), false);
+    try {
+      const d = await api("/api/connect/token", {method:"POST",
+                 body:JSON.stringify({label: $("label").value.trim()})});
+      $("config-json").textContent = JSON.stringify(d.config, null, 2);
+      const hrs = Math.round(d.expires_in/3600);
+      $("expiry").textContent = "Expires in ~" + hrs + " hour" + (hrs>1?"s":"") + ".";
+      show($("gen-out"), true);
+    } catch(e){ $("gen-err").textContent = e.message; show($("gen-err"), true); }
+  };
+
+  $("copy-btn").onclick = function(){
+    navigator.clipboard.writeText($("config-json").textContent).then(()=>{
+      $("copy-btn").textContent = "Copied ✓";
+      setTimeout(()=>{ $("copy-btn").textContent = "Copy config"; }, 1500);
+    });
+  };
+})();
+</script>
+</body>
+</html>

@@ -24,7 +24,7 @@ import time
 
 from . import audit, authz, classification, dlp, unicode_guard
 from .approvals import ApprovalStore
-from .config import GATEWAY, clearance_rank
+from .config import DATA_DIR, GATEWAY, clearance_rank
 from .controls import kill_switch, rate_limiter, server_limiter, tool_limiter
 from .mcp_manager import MCPManager
 from .registry import Registry
@@ -47,6 +47,29 @@ class Gateway:
         self._breaker: dict[str, dict] = {}
         self._breaker_threshold = GATEWAY.get("breaker_failure_threshold", 5)
         self._breaker_cooldown = GATEWAY.get("breaker_cooldown_seconds", 30)
+        # admin drain: refuse NEW calls to a server while in-flight work finishes
+        # (softer than stop/kill). Persisted so a drain survives a restart.
+        self._drain_file = DATA_DIR / "drained.json"
+        try:
+            self.drained: set[str] = set(json.loads(self._drain_file.read_text(encoding="utf-8")))
+        except Exception:
+            self.drained = set()
+
+    # ---- admin drain / breaker controls ----
+    def _save_drained(self):
+        self._drain_file.write_text(json.dumps(sorted(self.drained)), encoding="utf-8")
+
+    def drain(self, server: str):
+        self.drained.add(server)
+        self._save_drained()
+
+    def undrain(self, server: str):
+        self.drained.discard(server)
+        self._save_drained()
+
+    def reset_breaker(self, server: str):
+        """Admin force-close after fixing the underlying cause."""
+        self._breaker_reset(server)
 
     # ---- circuit breaker (contain a failing/compromised server) ----
     def _breaker_open(self, server: str) -> bool:
@@ -77,8 +100,11 @@ class Gateway:
     # ---- tool surface for the planner (spec §4.4.4 dynamic discovery) ----
     def visible_tools(self, claims: dict) -> list[dict]:
         role_ceiling = _role_ceiling(claims)
+        allowed = _role_servers(claims)
         out = []
         for t in self.mcp.all_tools():
+            if allowed is not None and t["server"] not in allowed:
+                continue
             entry = self.registry.get(t["server"], t["name"])
             if not entry or entry["status"] != "active":
                 continue
@@ -114,7 +140,18 @@ class Gateway:
         if not server_limiter.allow(server):
             return self._blocked(server, tool, "rate limit exceeded (per-server)", user, arguments)
 
-        # 3. registry
+        # 3. server entitlement (role allowlist) — the client-facing reason is identical
+        # to the unknown-tool case so a non-entitled caller cannot distinguish a hidden
+        # server from one that does not exist; audit records what really happened.
+        allowed = _role_servers(claims)
+        if allowed is not None and server not in allowed:
+            audit.record("blocked", user=user, server=server, tool=tool,
+                         reason="server not entitled to role", role=claims.get("role", ""),
+                         args_digest=audit.payload_digest(arguments))
+            return {"server": server, "tool": tool, "status": "blocked",
+                    "reason": "tool not in registry"}
+
+        # 3a. registry
         entry = self.registry.get(server, tool)
         if not entry:
             return self._blocked(server, tool, "tool not in registry", user, arguments)
@@ -122,6 +159,19 @@ class Gateway:
         # 3b. circuit breaker: a server that keeps failing is temporarily quarantined
         if self._breaker_open(server):
             return self._blocked(server, tool, "circuit open: server temporarily quarantined",
+                                 user, arguments)
+
+        # 3c. admin drain: new calls refused while the server is being drained
+        if server in self.drained:
+            return self._blocked(server, tool, "server drained by administrator", user, arguments)
+
+        # 3d. API-key scope cap: a scoped key may never call above its tier ceiling,
+        # regardless of the bound operator's role (a leaked read-only CI key cannot
+        # even queue a destructive action for approval).
+        cap = claims.get("tier_cap")
+        if cap is not None and entry["tier"] > cap:
+            return self._blocked(server, tool,
+                                 f"API key scope '{claims.get('scope')}' caps risk tier at {cap}",
                                  user, arguments)
 
         # 4. Unicode sanitize arguments
@@ -256,17 +306,21 @@ class Gateway:
 
     # ---- resources (MCP resources/list, resources/read) — governed like tool output ----
     def visible_resources(self, claims: dict) -> list[dict]:
+        allowed = _role_servers(claims)
         return [{"uri": _wrap_uri(r["server"], r["uri"]), "name": r.get("name") or r["uri"],
                  "description": r.get("description", ""), "mimeType": r.get("mimeType") or "text/plain",
                  "_meta": {"gateway": {"server": r["server"]}}}
-                for r in self.mcp.all_resources()]
+                for r in self.mcp.all_resources()
+                if allowed is None or r["server"] in allowed]
 
     async def read_resource(self, claims: dict, wrapped_uri: str) -> dict:
         server, orig = _unwrap_uri(wrapped_uri)
         user = claims["sub"]
         if server is None:
             return {"status": "blocked", "reason": "invalid gateway resource uri"}
-        if server not in self.mcp.servers:
+        allowed = _role_servers(claims)
+        if server not in self.mcp.servers or (allowed is not None and server not in allowed):
+            # entitlement block deliberately reads like a nonexistent server
             return {"status": "blocked", "reason": "unknown server"}
         blocked = kill_switch.blocked(user=user, server=server, tool="__resource__")
         if blocked:
@@ -275,6 +329,8 @@ class Gateway:
             return {"status": "blocked", "reason": "rate limit exceeded"}
         if self._breaker_open(server):
             return {"status": "blocked", "reason": "circuit open: server temporarily quarantined"}
+        if server in self.drained:
+            return {"status": "blocked", "reason": "server drained by administrator"}
         try:
             raw, blobs = await self.mcp.read_resource(server, orig)
         except Exception as exc:
@@ -295,14 +351,18 @@ class Gateway:
 
     # ---- prompts (MCP prompts/list, prompts/get) — templates re-entering model context ----
     def visible_prompts(self, claims: dict) -> list[dict]:
+        allowed = _role_servers(claims)
         return [{"name": f"{p['server']}__{p['name']}", "description": p.get("description", ""),
                  "arguments": p.get("arguments", []),
                  "_meta": {"gateway": {"server": p["server"], "prompt": p["name"]}}}
-                for p in self.mcp.all_prompts()]
+                for p in self.mcp.all_prompts()
+                if allowed is None or p["server"] in allowed]
 
     async def get_prompt(self, claims: dict, server: str, name: str, arguments: dict) -> dict:
         user = claims["sub"]
-        if server not in self.mcp.servers:
+        allowed = _role_servers(claims)
+        if server not in self.mcp.servers or (allowed is not None and server not in allowed):
+            # entitlement block deliberately reads like a nonexistent server
             return {"status": "blocked", "reason": "unknown server"}
         if kill_switch.blocked(user=user, server=server, tool="__prompt__"):
             return {"status": "blocked", "reason": "kill switch active"}
@@ -343,6 +403,19 @@ class Gateway:
 def _role_ceiling(claims: dict) -> int:
     from .config import POLICY
     return POLICY["roles"].get(claims.get("role", ""), {}).get("max_tool_tier", -1)
+
+
+def _role_servers(claims: dict) -> set[str] | None:
+    """Server entitlement for the caller's role. None = all servers ("*" or the
+    key omitted — legacy roles); an unknown role gets an empty set (deny all)."""
+    from .config import POLICY
+    role = POLICY["roles"].get(claims.get("role", ""))
+    if role is None:
+        return set()
+    servers = role.get("servers", "*")
+    if servers == "*":
+        return None
+    return set(servers or [])
 
 
 def _validate_args(tool: dict | None, args: dict) -> tuple[bool, str]:

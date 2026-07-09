@@ -51,10 +51,33 @@ def end_session(sid: str) -> None:
 
 
 def sessions_list() -> list[dict]:
-    """Live inbound MCP sessions (connected client LLMs) for the admin console."""
+    """Live inbound MCP sessions (connected client LLMs) for the admin console.
+    Only a 12-char prefix of the session id is exposed (the full id authenticates
+    requests to the session); termination matches on that prefix."""
     now = time.time()
     return [{"id": sid[:12], "sub": s["sub"], "age_seconds": round(now - s["created"])}
             for sid, s in _SESSIONS.items()]
+
+
+def terminate(sid_prefix: str) -> dict | None:
+    """Admin: kill one live MCP session by its exposed 12-char prefix. The client's
+    next request gets 'unknown or expired session' and must re-initialize (which
+    re-runs auth — a revoked/terminated user cannot come back)."""
+    if not sid_prefix or len(sid_prefix) < 12:
+        return None
+    for sid in list(_SESSIONS):
+        if sid.startswith(sid_prefix):
+            s = _SESSIONS.pop(sid)
+            return {"id": sid[:12], "sub": s["sub"]}
+    return None
+
+
+def terminate_for(sub: str) -> int:
+    """Admin: kill every live MCP session belonging to a subject."""
+    dead = [sid for sid, s in _SESSIONS.items() if s["sub"] == sub]
+    for sid in dead:
+        _SESSIONS.pop(sid, None)
+    return len(dead)
 
 
 # ---------- JSON-RPC helpers ----------

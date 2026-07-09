@@ -55,6 +55,16 @@ def decide(claims: dict, entry: dict | None, arguments: dict,
         return Decision("allow", 1, "reversible write, policy auto-approved",
                         taint=taint_hits, flags=unicode_flags)
 
+    # approval_min_tier: the lowest tier that still requires a human (default 2).
+    # Raising it to 3 auto-executes tier-2 writes INCLUDING taint-escalated ones —
+    # that disables injection containment for those calls; test/dev use only.
+    min_approval = int(POLICY.get("approval_min_tier", 2))
+    if effective_tier < min_approval:
+        return Decision("allow", effective_tier,
+                        f"auto-approved below approval_min_tier={min_approval}"
+                        + (" (TAINTED — containment relaxed)" if taint_hits else ""),
+                        taint=taint_hits, flags=unicode_flags)
+
     approvals = 2 if effective_tier >= 3 else 1
     reason = "requires human approval"
     if taint_hits:

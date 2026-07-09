@@ -72,7 +72,8 @@ def _authorize(client_id, challenge, state="xyz", scope="mcp") -> str:
               "code_challenge": challenge, "code_challenge_method": "S256",
               "state": state, "scope": scope}
     g = httpx.get(f"{BASE}/oauth/authorize", params=params, timeout=10)
-    assert g.status_code == 200 and "Authorize AI access" in g.text
+    # green login-styled authorize page: assert on the form fields, not copy text
+    assert g.status_code == 200 and 'name="username"' in g.text and 'action="/oauth/authorize"' in g.text
     form = dict(params)
     form["username"] = "sara"
     form["password"] = DEMO_PW["sara"]

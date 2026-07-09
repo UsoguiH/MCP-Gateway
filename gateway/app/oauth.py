@@ -217,6 +217,61 @@ def get_client(client_id: str) -> dict | None:
 
 
 # --------------------------------------------------------------------------
+# admin: client inventory + revocation
+# --------------------------------------------------------------------------
+
+def list_clients() -> list[dict]:
+    """Registered OAuth clients with live refresh-token counts and the subjects
+    that authorized them — the admin's view of who can reach /mcp via OAuth."""
+    with _lock:
+        _gc_refresh()
+        by_client: dict[str, list[dict]] = {}
+        for rec in _refresh.values():
+            by_client.setdefault(rec["client_id"], []).append(rec)
+        out = []
+        for cid, c in _clients.items():
+            toks = by_client.get(cid, [])
+            out.append({
+                "client_id": cid,
+                "client_name": c.get("client_name", ""),
+                "redirect_uris": c.get("redirect_uris", []),
+                "created": c.get("created"),
+                "active_refresh_tokens": len(toks),
+                "subjects": sorted({t["sub"] for t in toks}),
+            })
+    out.sort(key=lambda x: x.get("created") or 0, reverse=True)
+    return out
+
+
+def revoke_client(client_id: str) -> dict | None:
+    """Delete a client registration and every refresh token it holds. Outstanding
+    access tokens (<=1h) expire on their own; nothing can be renewed. Returns the
+    removed client record, or None if unknown."""
+    with _lock:
+        c = _clients.pop(client_id, None)
+        if c is None:
+            return None
+        _save_clients()
+        dead = [k for k, v in _refresh.items() if v.get("client_id") == client_id]
+        for k in dead:
+            _refresh.pop(k, None)
+        if dead:
+            _save_refresh()
+        return {**c, "refresh_tokens_revoked": len(dead)}
+
+
+def revoke_refresh_for_sub(sub: str) -> int:
+    """Kill every refresh token a subject holds (the 'sign out everywhere' path)."""
+    with _lock:
+        dead = [k for k, v in _refresh.items() if v.get("sub") == sub]
+        for k in dead:
+            _refresh.pop(k, None)
+        if dead:
+            _save_refresh()
+        return len(dead)
+
+
+# --------------------------------------------------------------------------
 # authorization code
 # --------------------------------------------------------------------------
 

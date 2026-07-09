@@ -26,13 +26,18 @@ import {
 import {
   useDashboard, buildSeries, RANGES, type Range, type Dashboard, type ServerRow,
 } from "./data";
-import { getUser, logout as apiLogout, type User } from "@/api";
+import { getUser, logout as apiLogout, apiPost, type User } from "@/api";
 import { LoginScreen, ChangePasswordScreen } from "./Login";
 import {
   ApprovalsPage, AuditPage, IdentitiesPage, RegistryPage, KillSwitchPage,
   AnomalyPage, InvestigatePage,
 } from "./AdminPages";
-import { Toaster } from "./toast";
+import { ApiKeysPage } from "./AccessPages";
+import {
+  useNotifications, NotificationFeed, NotificationDropdown, BellBadge, type Notif,
+} from "./notify";
+import { ConfirmModal, Field, GhostBtn, Modal, PrimaryBtn, SelectInput, TextInput } from "./ui";
+import { toast, Toaster } from "./toast";
 
 type Page =
   | "Overview" | "Servers" | "Tools" | "Logs" | "Clients"
@@ -42,6 +47,7 @@ type Page =
 
 const STATUS_COLOR: Record<string, string> = {
   Online: "#4AA785", Degraded: "#E5A000", Offline: "#D9534F",
+  Stopped: "#787878", Draining: "#E5A000",
 };
 const CLIENT_COLORS = ["#edeefc", "#e6f1fd", "#e3f5e5", "#fdf0e6", "#f2e6fd", "#e6fdfa"];
 const ACTIVITY_AVATARS = [imgAbstract03, imgFemale03, imgMale02, img3D03, imgAbstract04];
@@ -228,12 +234,12 @@ function NavGroup({ label, icon, items, page, setPage }: { label: string; icon: 
 
 function Header({
   page, setPage, query, setQuery, leftOpen, setLeftOpen, rightOpen, setRightOpen,
-  dark, setDark, onRefresh, notifications,
+  dark, setDark, onRefresh, notifs, unread, onMarkAllRead,
 }: {
   page: Page; setPage: (p: Page) => void; query: string; setQuery: (q: string) => void;
   leftOpen: boolean; setLeftOpen: (v: boolean) => void; rightOpen: boolean; setRightOpen: (v: boolean) => void;
   dark: boolean; setDark: (v: boolean) => void; onRefresh: () => void;
-  notifications: Dashboard["notifications"];
+  notifs: Notif[]; unread: number; onMarkAllRead: () => void;
 }) {
   const [bellOpen, setBellOpen] = useState(false);
   const [spinning, setSpinning] = useState(false);
@@ -274,26 +280,14 @@ function Header({
           </button>
           <div className="relative">
             <button title="Notifications" onClick={() => setBellOpen(!bellOpen)}
-              className={`p-1 rounded-lg hover:bg-black/[0.04] ${bellOpen ? "bg-black/[0.04]" : ""}`}>
+              className={`relative p-1 rounded-lg hover:bg-black/[0.04] ${bellOpen ? "bg-black/[0.04]" : ""}`}>
               <Bell size={16} className="text-black" />
-              <span className="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full" style={{ background: "#E5A000" }} />
+              <BellBadge unread={unread} />
             </button>
             {bellOpen && (
-              <div className="absolute right-0 top-8 w-[280px] bg-white border border-black/10 rounded-2xl shadow-lg p-2 z-50 flex flex-col gap-1">
-                <p className="text-sm text-black font-normal px-2 py-2">Notifications</p>
-                {(notifications.length ? notifications : [{ kind: "server", text: "No recent events.", time: "" }]).map((n, i) => (
-                  <div key={i} className="flex items-start gap-2 p-2 rounded-xl hover:bg-black/[0.03]">
-                    <NotifIcon bg={i % 2 ? "#e6f1fd" : "#edeefc"}>{n.kind === "warn" ? <WarnSmallIcon /> : <ServerSmallIcon />}</NotifIcon>
-                    <div className="flex flex-col min-w-0">
-                      <span className="text-sm text-black leading-5">{n.text}</span>
-                      <span className="text-xs text-black/40 leading-4">{n.time}</span>
-                    </div>
-                  </div>
-                ))}
-                <button onClick={() => { setRightOpen(true); setBellOpen(false); }} className="text-xs text-black/40 hover:text-black px-2 py-2 text-left">
-                  View all in panel →
-                </button>
-              </div>
+              <NotificationDropdown items={notifs} unread={unread}
+                onMarkAllRead={onMarkAllRead}
+                onViewAll={() => { setRightOpen(true); setBellOpen(false); }} />
             )}
           </div>
           <button title="Fullscreen" onClick={toggleFullscreen} className="p-1 rounded-lg hover:bg-black/[0.04]">
@@ -503,14 +497,20 @@ function OverviewPage({ d, range, cycleRange, tick }: { d: Dashboard; range: Ran
   );
 }
 
-function ServersPage({ d, query, onManage }: { d: Dashboard; query: string; onManage: (s: ServerRow) => void }) {
+function ServersPage({ d, query, onManage, onChanged }: { d: Dashboard; query: string; onManage: (s: ServerRow) => void; onChanged: () => void }) {
   const rows = d.servers.filter((s) => s.name.toLowerCase().includes(query.toLowerCase()));
+  const [addOpen, setAddOpen] = useState(false);
   return (
     <>
       <div className="flex items-center justify-between">
         <h1 className="text-sm font-semibold text-black">Servers</h1>
-        <span className="text-xs text-black/40">{rows.length} of {d.servers.length} servers</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-black/40">{rows.length} of {d.servers.length} servers</span>
+          <button onClick={() => setAddOpen(true)}
+            className="text-xs text-white px-3 py-1.5 rounded-lg bg-[#1C1C1C] hover:opacity-80">+ Add server</button>
+        </div>
       </div>
+      {addOpen && <AddServerModal onClose={() => setAddOpen(false)} onAdded={() => { setAddOpen(false); onChanged(); }} />}
       <CardBox>
         {rows.length === 0 ? <Empty label="No servers connected." /> : (
           <table className="w-full">
@@ -544,9 +544,43 @@ function ServersPage({ d, query, onManage }: { d: Dashboard; query: string; onMa
   );
 }
 
-function ManageDrawer({ server, onClose }: { server: ServerRow; onClose: () => void }) {
+function ManageDrawer({ server, onClose, onChanged }: { server: ServerRow; onClose: () => void; onChanged: () => void }) {
   const det = server.detail || {};
   const tiers = det.tiers || {};
+  const [busy, setBusy] = useState<string | null>(null);
+  const [removeOpen, setRemoveOpen] = useState(false);
+  const stopped = det.state === "stopped";
+  const drained = !!det.drained;
+
+  const act = async (action: string, label: string) => {
+    setBusy(action);
+    try {
+      await apiPost(`/api/admin/servers/${server.name}/${action}`);
+      toast(label);
+      onChanged();
+      onClose();
+    } catch (e: any) { toast(e.message || `${action} failed`, "err"); }
+    finally { setBusy(null); }
+  };
+  const doRemove = async () => {
+    setRemoveOpen(false);
+    setBusy("remove");
+    try {
+      await apiPost(`/api/admin/servers/${server.name}/remove`);
+      toast(`Server ${server.name} removed.`);
+      onChanged();
+      onClose();
+    } catch (e: any) { toast(e.message || "remove failed", "err"); }
+    finally { setBusy(null); }
+  };
+  const Btn = ({ action, label, busyLabel, danger }: { action: string; label: string; busyLabel: string; danger?: boolean }) => (
+    <button onClick={() => act(action, `${server.name}: ${busyLabel}`)} disabled={!!busy}
+      className="text-xs px-3 py-2 rounded-lg border border-black/10 hover:bg-black/[0.04] disabled:opacity-40 flex-1 min-w-[100px]"
+      style={danger ? { color: "#D9534F" } : undefined}>
+      {busy === action ? "Working…" : label}
+    </button>
+  );
+
   return (
     <div className="fixed inset-0 z-50 flex justify-end" style={{ background: "rgba(0,0,0,0.3)" }} onClick={onClose}>
       <div className="h-full w-[360px] bg-white p-6 flex flex-col gap-5 overflow-y-auto" style={{ fontFamily: "Inter, sans-serif" }} onClick={(e) => e.stopPropagation()}>
@@ -555,6 +589,28 @@ function ManageDrawer({ server, onClose }: { server: ServerRow; onClose: () => v
           <button onClick={onClose} className="text-xs text-black/40 hover:text-black">Close</button>
         </div>
         <div className="flex items-center gap-2"><StatusDot status={server.status} /><span className="text-xs text-black/40">{server.transport}</span></div>
+
+        <div className="bg-[#f9f9fa] rounded-[20px] p-5 flex flex-col gap-3">
+          <span className="text-sm font-normal text-black">Server actions</span>
+          <div className="flex gap-2 flex-wrap">
+            {stopped
+              ? <Btn action="start" label="▶ Start" busyLabel="started" />
+              : <>
+                  <Btn action="restart" label="↻ Restart" busyLabel="restarted" />
+                  <Btn action="stop" label="■ Stop" busyLabel="stopped" danger />
+                </>}
+            {!stopped && (drained
+              ? <Btn action="undrain" label="Resume traffic" busyLabel="traffic resumed" />
+              : <Btn action="drain" label="Drain" busyLabel="draining — new calls refused" />)}
+            {(det.breaker_open || (det.fails ?? 0) > 0) &&
+              <Btn action="breaker_reset" label="Reset breaker" busyLabel="breaker force-closed" />}
+          </div>
+          <button onClick={() => setRemoveOpen(true)} disabled={!!busy}
+            className="text-xs px-3 py-2 rounded-lg border border-black/10 hover:bg-black/[0.04] disabled:opacity-40" style={{ color: "#D9534F" }}>
+            Remove server from gateway…
+          </button>
+        </div>
+
         <div className="grid grid-cols-2 gap-3">
           <Metric label="Tools" value={String(server.tools)} />
           <Metric label="Active" value={String(det.active ?? "—")} />
@@ -571,13 +627,76 @@ function ManageDrawer({ server, onClose }: { server: ServerRow; onClose: () => v
           ))}
         </div>
         <div className="bg-[#f9f9fa] rounded-[20px] p-5 flex flex-col gap-2 text-xs">
+          <Row label="State" value={det.state === "stopped" ? "Stopped" : drained ? "Draining" : "Running"} color={det.state === "stopped" ? "#787878" : drained ? "#E5A000" : "#4AA785"} />
           <Row label="Circuit breaker" value={det.breaker_open ? "Open (quarantined)" : "Closed"} color={det.breaker_open ? "#D9534F" : "#4AA785"} />
           <Row label="Recent failures" value={String(det.fails ?? 0)} />
           <Row label="Managed credentials" value={det.managed_credentials ? "Yes" : "No"} />
         </div>
-        <span className="text-xs text-black/30">Server administration (restart, re-tier, kill-switch) is available through the gateway admin API.</span>
+        {removeOpen && (
+          <ConfirmModal title={`Remove ${server.name}?`}
+            body={<>The server disconnects immediately and stays removed across gateway restarts (its registry entries are kept in case it is re-added). Tool calls to it will fail.</>}
+            confirmLabel="Remove server" onCancel={() => setRemoveOpen(false)} onConfirm={doRemove} />
+        )}
       </div>
     </div>
+  );
+}
+
+function AddServerModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
+  const [name, setName] = useState("");
+  const [transport, setTransport] = useState("stdio");
+  const [command, setCommand] = useState("python");
+  const [args, setArgs] = useState("");
+  const [url, setUrl] = useState("");
+  const [env, setEnv] = useState("");
+  const [busy, setBusy] = useState(false);
+  const add = async () => {
+    if (!name.trim()) { toast("Server name is required", "err"); return; }
+    const envObj: Record<string, string> = {};
+    for (const line of env.split("\n")) {
+      const [k, ...v] = line.split("=");
+      if (k.trim() && v.length) envObj[k.trim()] = v.join("=").trim();
+    }
+    setBusy(true);
+    try {
+      const r = await apiPost("/api/admin/servers/add", {
+        name: name.trim(), transport,
+        command: command.trim(), args: args.split(/\s+/).filter(Boolean),
+        url: url.trim(), env: envObj,
+      });
+      toast(`Server ${r.server} connected — ${r.tools} tool(s) discovered${r.pending_tools ? `, ${r.pending_tools} pending approval` : ""}.`);
+      onAdded();
+    } catch (e: any) { toast(e.message || "Add failed", "err"); }
+    finally { setBusy(false); }
+  };
+  return (
+    <Modal title="Add MCP server" onClose={onClose} width={460}>
+      <Field label="Name (unique, no '__')"><TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. weather" autoFocus /></Field>
+      <Field label="Transport">
+        <SelectInput value={transport} onChange={(e) => setTransport(e.target.value)}>
+          <option value="stdio">stdio (local subprocess)</option>
+          <option value="http">http (remote Streamable-HTTP)</option>
+        </SelectInput>
+      </Field>
+      {transport === "stdio" ? (
+        <>
+          <Field label="Command"><TextInput value={command} onChange={(e) => setCommand(e.target.value)} placeholder="python" /></Field>
+          <Field label="Arguments (space-separated)"><TextInput value={args} onChange={(e) => setArgs(e.target.value)} placeholder="servers/weather_server.py" /></Field>
+          <Field label="Environment (KEY=value per line; ${VAR} expands from the gateway env)">
+            <textarea value={env} onChange={(e) => setEnv(e.target.value)} rows={3}
+              className="bg-white border border-black/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-black/30 font-mono"
+              placeholder={"API_URL=${WEATHER_URL}"} />
+          </Field>
+        </>
+      ) : (
+        <Field label="URL"><TextInput value={url} onChange={(e) => setUrl(e.target.value)} placeholder="https://host:port/mcp" /></Field>
+      )}
+      <p className="text-xs text-black/40 leading-4">The server connects immediately and persists across gateway restarts. New tools go through the normal onboarding gate.</p>
+      <div className="flex gap-2 justify-end">
+        <GhostBtn onClick={onClose}>Cancel</GhostBtn>
+        <PrimaryBtn onClick={add} disabled={busy}>{busy ? "Connecting…" : "Connect server"}</PrimaryBtn>
+      </div>
+    </Modal>
   );
 }
 function Metric({ label, value }: { label: string; value: string }) {
@@ -652,8 +771,16 @@ function LogsPage({ d, query }: { d: Dashboard; query: string }) {
   );
 }
 
-function ClientsPage({ d, query }: { d: Dashboard; query: string }) {
+function ClientsPage({ d, query, onChanged }: { d: Dashboard; query: string; onChanged: () => void }) {
   const rows = d.clients.filter((c) => c.name.toLowerCase().includes(query.toLowerCase()));
+  const terminate = async (c: Dashboard["clients"][number]) => {
+    if (!c.id) return;
+    try {
+      await apiPost(`/api/admin/sessions/${c.id}/terminate`);
+      toast(`Session ${c.id} terminated — the client must re-authenticate.`);
+      onChanged();
+    } catch (e: any) { toast(e.message || "Terminate failed", "err"); }
+  };
   return (
     <>
       <div className="flex items-center justify-between">
@@ -665,7 +792,7 @@ function ClientsPage({ d, query }: { d: Dashboard; query: string }) {
           {rows.map((c, i) => (
             <div key={c.name + i} className="flex-1 min-w-[220px] bg-[#f9f9fa] rounded-[20px] p-6 flex flex-col gap-3">
               <div className="flex items-center gap-2">
-                <InitialAvatar name={c.name} bg={CLIENT_COLORS[i % CLIENT_COLORS.length]} />
+                <InitialAvatar name={c.sub || c.name} bg={CLIENT_COLORS[i % CLIENT_COLORS.length]} />
                 <span className="text-sm text-black font-normal flex-1">{c.name}</span>
                 <StatusDot status={c.status} />
               </div>
@@ -679,51 +806,16 @@ function ClientsPage({ d, query }: { d: Dashboard; query: string }) {
                   <span className="text-xs text-black/40">{c.lastActive}</span>
                 </div>
               </div>
+              {c.id && (
+                <button onClick={() => terminate(c)}
+                  className="text-xs px-3 py-1.5 rounded-lg border border-black/10 hover:bg-black/[0.04]" style={{ color: "#D9534F" }}>
+                  Terminate session
+                </button>
+              )}
             </div>
           ))}
         </div>
       )}
-    </>
-  );
-}
-
-const INITIAL_KEYS = [
-  { name: "production", token: "mcp_k1…9f2c", scope: "Full access", created: "May 12, 2026", lastUsed: "Just now" },
-  { name: "staging", token: "mcp_k2…41ab", scope: "Read + call", created: "May 30, 2026", lastUsed: "2 hours ago" },
-  { name: "ci-pipeline", token: "mcp_k3…77de", scope: "Read only", created: "Jun 8, 2026", lastUsed: "Yesterday" },
-];
-function ApiKeysPage() {
-  const [keys, setKeys] = useState(INITIAL_KEYS);
-  const [counter, setCounter] = useState(4);
-  const createKey = () => {
-    const suffix = Math.random().toString(16).slice(2, 6);
-    setKeys([...keys, { name: `key-${counter}`, token: `mcp_k${counter}…${suffix}`, scope: "Read only", created: "Just now", lastUsed: "—" }]);
-    setCounter(counter + 1);
-  };
-  const revoke = (name: string) => setKeys(keys.filter((k) => k.name !== name));
-  return (
-    <>
-      <div className="flex items-center justify-between">
-        <h1 className="text-sm font-semibold text-black">API Keys</h1>
-        <button onClick={createKey} className="text-xs text-black px-3 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04]">+ Create key</button>
-      </div>
-      <CardBox>
-        <table className="w-full">
-          <thead><tr><Th>Name</Th><Th>Token</Th><Th>Scope</Th><Th>Created</Th><Th>Last Used</Th><Th right></Th></tr></thead>
-          <tbody>
-            {keys.map((k) => (
-              <tr key={k.name} className="hover:bg-black/[0.02]">
-                <Td>{k.name}</Td>
-                <Td><span className="text-black/60">{k.token}</span></Td>
-                <Td>{k.scope}</Td>
-                <Td><span className="text-black/60">{k.created}</span></Td>
-                <Td><span className="text-black/60">{k.lastUsed}</span></Td>
-                <Td right><button onClick={() => revoke(k.name)} className="text-xs px-3 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04]" style={{ color: "#D9534F" }}>Revoke</button></Td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </CardBox>
     </>
   );
 }
@@ -845,12 +937,12 @@ function NotifIcon({ bg, children }: { bg: string; children: React.ReactNode }) 
   return <div className="w-6 h-6 rounded-lg flex items-center justify-center shrink-0" style={{ background: bg }}>{children}</div>;
 }
 
-function RightSidebarRail({ setOpen, setPage, clients }: { setOpen: (v: boolean) => void; setPage: (p: Page) => void; clients: Dashboard["clients"] }) {
+function RightSidebarRail({ setOpen, setPage, clients, unread }: { setOpen: (v: boolean) => void; setPage: (p: Page) => void; clients: Dashboard["clients"]; unread: number }) {
   return (
     <aside className="w-[72px] h-full flex flex-col items-center overflow-y-auto border-l border-black/10 py-3 gap-1.5 bg-white" style={{ fontFamily: "Inter, sans-serif" }}>
       <button title="Notifications" onClick={() => setOpen(true)} className="relative p-2.5 rounded-xl hover:bg-black/[0.03] cursor-pointer">
         <Bell size={20} strokeWidth={1.5} className="text-black" />
-        <span className="absolute top-2 right-2 w-2 h-2 rounded-full" style={{ background: "#E5A000" }} />
+        <BellBadge unread={unread} />
       </button>
       <button title="Activities" onClick={() => setOpen(true)} className="p-2.5 rounded-xl hover:bg-black/[0.03] cursor-pointer">
         <span className="flex items-center justify-center" style={{ transform: "scale(1.35)", width: 16, height: 16 }}><ActivitySmallIcon /></span>
@@ -866,32 +958,25 @@ function RightSidebarRail({ setOpen, setPage, clients }: { setOpen: (v: boolean)
   );
 }
 
-function RightSidebar({ open, setOpen, setPage, d }: { open: boolean; setOpen: (v: boolean) => void; setPage: (p: Page) => void; d: Dashboard }) {
+function RightSidebar({ open, setOpen, setPage, d, notifs, unread, onMarkAllRead, onClearRead }: {
+  open: boolean; setOpen: (v: boolean) => void; setPage: (p: Page) => void; d: Dashboard;
+  notifs: Notif[]; unread: number; onMarkAllRead: () => void; onClearRead: () => void;
+}) {
   if (!open) {
     return <div className="shrink-0 h-full overflow-hidden transition-all duration-200" style={{ width: 72 }}>
-      <RightSidebarRail setOpen={setOpen} setPage={setPage} clients={d.clients} />
+      <RightSidebarRail setOpen={setOpen} setPage={setPage} clients={d.clients} unread={unread} />
     </div>;
   }
-  const notifications = d.notifications.length ? d.notifications : [{ kind: "server", text: "No recent events.", time: "" }];
   const activities = d.activities.length ? d.activities : [{ text: "No recent activity.", time: "" }];
   return (
-    <div className="shrink-0 h-full overflow-hidden transition-all duration-200" style={{ width: 280 }}>
-      <aside className="w-[280px] h-full border-l border-black/10 overflow-y-auto flex flex-col p-4 gap-4 bg-white" style={{ fontFamily: "Inter, sans-serif" }}>
-        <div className="flex flex-col gap-1">
-          <p className="text-sm text-black font-normal px-1 py-2">Notifications</p>
-          {notifications.map((n, i) => (
-            <div key={i} className="flex items-start gap-2 p-2 rounded-xl">
-              <NotifIcon bg={i % 2 ? "#e6f1fd" : "#edeefc"}>{n.kind === "warn" ? <WarnSmallIcon /> : <ServerSmallIcon />}</NotifIcon>
-              <div className="flex flex-col min-w-0"><span className="text-sm text-black leading-5">{n.text}</span><span className="text-xs text-black/40 leading-4">{n.time}</span></div>
-            </div>
-          ))}
-        </div>
+    <div className="shrink-0 h-full overflow-hidden transition-all duration-200" style={{ width: 300 }}>
+      <aside className="w-[300px] h-full border-l border-black/10 overflow-y-auto flex flex-col p-4 gap-4 bg-white" style={{ fontFamily: "Inter, sans-serif" }}>
+        <NotificationFeed items={notifs} unread={unread} onMarkAllRead={onMarkAllRead} onClearRead={onClearRead} />
         <div className="flex flex-col gap-1 relative">
           <p className="text-sm text-black font-normal px-1 py-2">Activities</p>
-          <div className="absolute left-[19px] top-[79px] w-px bg-black/10" style={{ height: "calc(100% - 79px - 16px)" }} />
           {activities.map((a, i) => (
             <div key={i} className="flex items-start gap-2 p-2 rounded-xl">
-              <Avatar src={ACTIVITY_AVATARS[i % ACTIVITY_AVATARS.length]} size={24} />
+              <div className="rounded-full shrink-0 bg-white border border-black/10" style={{ width: 24, height: 24 }} />
               <div className="flex flex-col min-w-0"><span className="text-sm text-black leading-5">{a.text}</span><span className="text-xs text-black/40 leading-4">{a.time}</span></div>
             </div>
           ))}
@@ -970,9 +1055,10 @@ function Dashboard_({ user, onLoggedOut }: { user: User; onLoggedOut: () => void
 
   const onAuthExpired = useCallback(() => onLoggedOut(), [onLoggedOut]);
   const { data, refresh } = useDashboard(onAuthExpired);
+  const notif = useNotifications(onAuthExpired);
 
   const cycleRange = () => setRange(RANGES[(RANGES.indexOf(range) + 1) % RANGES.length]);
-  const onRefresh = () => { setTick((t) => t + 1); refresh(); };
+  const onRefresh = () => { setTick((t) => t + 1); refresh(); notif.reload(); };
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-white"
@@ -982,14 +1068,15 @@ function Dashboard_({ user, onLoggedOut }: { user: User; onLoggedOut: () => void
       <div className="flex-1 flex flex-col overflow-hidden min-w-0">
         <Header page={page} setPage={setPage} query={query} setQuery={setQuery}
           leftOpen={leftOpen} setLeftOpen={setLeftOpen} rightOpen={rightOpen} setRightOpen={setRightOpen}
-          dark={dark} setDark={setDark} onRefresh={onRefresh} notifications={data.notifications} />
+          dark={dark} setDark={setDark} onRefresh={onRefresh}
+          notifs={notif.items} unread={notif.unread} onMarkAllRead={notif.markAllRead} />
         <div className="flex-1 overflow-y-auto p-6 flex flex-col gap-4 min-w-0" style={{ fontFamily: "Inter, sans-serif" }}>
           {page === "Overview" && <OverviewPage d={data} range={range} cycleRange={cycleRange} tick={tick} />}
-          {page === "Servers" && <ServersPage d={data} query={query} onManage={setManage} />}
+          {page === "Servers" && <ServersPage d={data} query={query} onManage={setManage} onChanged={onRefresh} />}
           {page === "Tools" && <ToolsPage d={data} query={query} />}
           {page === "Logs" && <LogsPage d={data} query={query} />}
-          {page === "Clients" && <ClientsPage d={data} query={query} />}
-          {page === "API Keys" && <ApiKeysPage />}
+          {page === "Clients" && <ClientsPage d={data} query={query} onChanged={onRefresh} />}
+          {page === "API Keys" && <ApiKeysPage onAuthExpired={onAuthExpired} />}
           {page === "Rate Limits" && <RateLimitsPage d={data} />}
           {page === "Policies" && <PoliciesPage d={data} />}
           {page === "Alerts" && <AlertsPage />}
@@ -1003,8 +1090,9 @@ function Dashboard_({ user, onLoggedOut }: { user: User; onLoggedOut: () => void
           {page === "Sessions" && <InvestigatePage query={query} onAuthExpired={onAuthExpired} />}
         </div>
       </div>
-      <RightSidebar open={rightOpen} setOpen={setRightOpen} setPage={setPage} d={data} />
-      {manage && <ManageDrawer server={manage} onClose={() => setManage(null)} />}
+      <RightSidebar open={rightOpen} setOpen={setRightOpen} setPage={setPage} d={data}
+        notifs={notif.items} unread={notif.unread} onMarkAllRead={notif.markAllRead} onClearRead={notif.clearRead} />
+      {manage && <ManageDrawer server={manage} onClose={() => setManage(null)} onChanged={onRefresh} />}
       {logoutOpen && <LogoutModal onCancel={() => setLogoutOpen(false)} onConfirm={async () => { setLogoutOpen(false); await apiLogout(); onLoggedOut(); }} />}
       <Toaster />
     </div>

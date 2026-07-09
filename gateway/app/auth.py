@@ -82,6 +82,154 @@ _challenges: dict[str, tuple[str, float]] = {}   # nonce -> (cert_thumbprint, ex
 _seen_jti: dict[str, float] = {}                 # jti -> expiry
 _fails: dict[str, tuple[int, float]] = {}        # subject -> (count, locked_until)
 
+# ---------- operator lifecycle (admin-managed user directory overlay) ----------
+# The in-code USERS dict is the seed directory; admins manage operators from the
+# dashboard. Changes persist as an overlay in DATA_DIR/operators.json:
+#   {"sub": {"name","role","clearance"}}      -> created or role-edited operator
+#   {"sub": {"removed": true}}                -> offboarded (even a seed user)
+# Applied at import time, so USERS everywhere reflects the managed directory.
+_OPS_FILE = DATA_DIR / "operators.json"
+
+
+def _read_ops_overlay() -> dict:
+    try:
+        return json.loads(_OPS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _write_ops_overlay(d: dict):
+    _OPS_FILE.write_text(json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _apply_ops_overlay():
+    for sub, rec in _read_ops_overlay().items():
+        if rec.get("removed"):
+            USERS.pop(sub, None)
+        else:
+            base = USERS.get(sub, {})
+            USERS[sub] = {"role": rec.get("role", base.get("role", "employee")),
+                          "clearance": rec.get("clearance", base.get("clearance", "restricted")),
+                          "name": rec.get("name", base.get("name", sub)),
+                          **{k: v for k, v in base.items()
+                             if k not in ("role", "clearance", "name")}}
+
+
+def create_operator(sub: str, name: str, role: str, clearance: str) -> tuple[bool, str]:
+    from .config import POLICY, CLEARANCE_ORDER
+    sub = (sub or "").strip().lower()
+    if not sub or not sub.replace("-", "").replace("_", "").isalnum() or len(sub) > 32:
+        return False, "username must be 1-32 alphanumeric/-/_ characters"
+    if sub in USERS:
+        return False, f"operator {sub!r} already exists"
+    if role not in POLICY["roles"]:
+        return False, f"unknown role {role!r}"
+    if clearance not in CLEARANCE_ORDER:
+        return False, f"unknown clearance {clearance!r}"
+    with _lock:
+        d = _read_ops_overlay()
+        d[sub] = {"name": (name or sub)[:80], "role": role, "clearance": clearance}
+        _write_ops_overlay(d)
+    _apply_ops_overlay()
+    return True, ""
+
+
+def update_operator(sub: str, role: str | None = None, clearance: str | None = None,
+                    name: str | None = None) -> tuple[bool, str]:
+    from .config import POLICY, CLEARANCE_ORDER
+    u = USERS.get(sub)
+    if not u:
+        return False, f"unknown operator {sub!r}"
+    if role is not None and role not in POLICY["roles"]:
+        return False, f"unknown role {role!r}"
+    if clearance is not None and clearance not in CLEARANCE_ORDER:
+        return False, f"unknown clearance {clearance!r}"
+    with _lock:
+        d = _read_ops_overlay()
+        rec = d.get(sub) or {}
+        rec.pop("removed", None)
+        rec["name"] = name if name is not None else u["name"]
+        rec["role"] = role if role is not None else u["role"]
+        rec["clearance"] = clearance if clearance is not None else u["clearance"]
+        d[sub] = rec
+        _write_ops_overlay(d)
+    _apply_ops_overlay()
+    return True, ""
+
+
+def remove_operator(sub: str) -> tuple[bool, str]:
+    """Offboard: drop from the directory, purge credential + authenticator, and
+    kill every live session/token. Existing tokens die because verify() no longer
+    finds the subject; belt-and-braces we also stamp a session not-before."""
+    if sub not in USERS:
+        return False, f"unknown operator {sub!r}"
+    with _lock:
+        d = _read_ops_overlay()
+        d[sub] = {"removed": True}
+        _write_ops_overlay(d)
+        USERS.pop(sub, None)
+        creds = _read_creds()
+        if sub in creds:
+            creds.pop(sub)
+            _CREDS_FILE.write_text(json.dumps(creds, indent=2), encoding="utf-8")
+    unenroll_totp(sub)
+    terminate_sessions(sub)
+    return True, ""
+
+
+def reset_password(sub: str) -> tuple[str | None, str]:
+    """Admin reset: generate a strong temporary password (returned ONCE), force
+    rotation at next login. Returns (temp_password, error)."""
+    if sub not in USERS:
+        return None, f"unknown operator {sub!r}"
+    import string
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*-_"
+    while True:
+        pw = "".join(secrets.choice(alphabet) for _ in range(16))
+        if password_strength(pw)[0]:
+            break
+    ok, msg = set_password(sub, pw, must_change=True)
+    return (pw, "") if ok else (None, msg)
+
+
+# ---------- session termination ("sign out everywhere") ----------
+# Tokens are stateless JWTs, so termination is a per-subject not-before stamp:
+# any token issued BEFORE the stamp is refused by every verifier (console
+# sessions, OAuth access tokens, API keys). Persisted so it survives a restart.
+_SESSION_NB_FILE = DATA_DIR / "session_nb.json"
+
+
+def _load_session_nb() -> dict:
+    try:
+        return {k: float(v) for k, v in
+                json.loads(_SESSION_NB_FILE.read_text(encoding="utf-8")).items()}
+    except Exception:
+        return {}
+
+
+_session_nb: dict[str, float] = _load_session_nb()
+
+
+def session_not_before(sub: str) -> float:
+    return _session_nb.get(sub, 0.0)
+
+
+def terminate_sessions(sub: str):
+    """Invalidate every outstanding token for `sub` (issued before now)."""
+    with _lock:
+        _session_nb[sub] = time.time()
+        _SESSION_NB_FILE.write_text(json.dumps(_session_nb), encoding="utf-8")
+    try:                                     # refresh tokens die too (late import: no cycle)
+        from . import oauth
+        oauth.revoke_refresh_for_sub(sub)
+    except Exception:
+        pass
+    try:                                     # live inbound MCP sessions drop immediately
+        from . import mcp_server
+        mcp_server.terminate_for(sub)
+    except Exception:
+        pass
+
 # M2: revocations persist to disk so a kill survives a restart.
 _REVOKED_FILE = DATA_DIR / "revoked.json"
 
@@ -365,6 +513,7 @@ def password_status(username: str) -> dict:
             "change_required": password_change_required(username)}
 
 
+_apply_ops_overlay()                     # admin-managed operators join/leave the directory
 _load_credentials()
 # A real hash to run even on unknown users, so login timing doesn't leak who exists.
 _DUMMY_HASH = hash_password(secrets.token_hex(16))
@@ -617,6 +766,10 @@ def _verify_builtin(token: str, cert_thumbprint: str | None) -> dict | None:
         return None
     if claims["sub"] in _revoked_subjects:
         return None
+    if claims["iat"] < session_not_before(claims["sub"]):
+        return None                       # admin terminated this subject's sessions
+    if claims["sub"] not in USERS:
+        return None                       # offboarded operator: tokens die immediately
     with _lock:
         _gc(_seen_jti)
         _seen_jti[claims["jti"]] = claims["exp"]
@@ -675,6 +828,10 @@ def verify_oauth_access(token: str) -> dict | None:
         return None
     if claims["jti"] in _revoked_token_jti:
         return None
+    if claims["iat"] < session_not_before(claims["sub"]):
+        return None                       # admin terminated this subject's sessions
+    if claims["sub"] not in USERS:
+        return None                       # offboarded operator
     return claims
 
 

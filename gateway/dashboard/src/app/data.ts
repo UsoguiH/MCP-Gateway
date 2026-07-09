@@ -20,7 +20,8 @@ export type ServerRow = {
   tools: number; version: string; latency: string; uptime: string;
   detail?: { tiers?: Record<string, number>; active?: number; pending?: number;
              quarantined?: number; breaker_open?: boolean; fails?: number;
-             managed_credentials?: boolean };
+             managed_credentials?: boolean; state?: string; drained?: boolean;
+             started_at?: number | null };
 };
 export type ToolRow = {
   tool: string; server: string; calls: number; success: number; avg: string; tier?: number;
@@ -30,6 +31,7 @@ export type LogRow = {
 };
 export type ClientRow = {
   name: string; requests: number; sessions: number; lastActive: string; status: string;
+  id?: string; sub?: string;
 };
 export type Dashboard = {
   loaded: boolean;
@@ -133,19 +135,25 @@ async function loadDashboard(): Promise<Dashboard> {
 
   const servers: ServerRow[] = srvList.map((s) => {
     const online = healthServers.includes(s.name);
-    const status = !online ? "Offline" : s.breaker_open ? "Degraded" : "Online";
+    const status = s.state === "stopped" ? "Stopped"
+      : s.drained ? "Draining"
+      : !online ? "Offline"
+      : s.breaker_open ? "Degraded" : "Online";
+    const uptime = s.started_at && s.state !== "stopped"
+      ? relTime(s.started_at).replace(" ago", "") : "—";
     return {
       name: s.name,
       status,
-      transport: "stdio",
+      transport: s.transport || "stdio",
       tools: s.tools ?? 0,
       version: "—",
       latency: "—",
-      uptime: "—",
+      uptime,
       detail: {
         tiers: s.tiers, active: s.active, pending: s.pending,
         quarantined: s.quarantined, breaker_open: s.breaker_open,
         fails: s.fails, managed_credentials: s.managed_credentials,
+        state: s.state, drained: s.drained, started_at: s.started_at,
       },
     };
   });
@@ -194,11 +202,12 @@ async function loadDashboard(): Promise<Dashboard> {
 
   const sessions: any[] = sessionsResp?.sessions || [];
   const clients: ClientRow[] = sessions.map((s: any) => ({
-    name: s.client || s.name || s.id || "MCP client",
+    name: s.sub ? `${s.sub} · ${s.id}` : (s.client || s.name || s.id || "MCP client"),
     requests: s.calls ?? s.requests ?? 0,
     sessions: 1,
-    lastActive: relTime(s.last_seen || s.created),
+    lastActive: s.age_seconds != null ? `connected ${Math.floor(s.age_seconds / 60)}m` : relTime(s.last_seen || s.created),
     status: "Online",
+    id: s.id, sub: s.sub,
   }));
 
   const g = configResp?.gateway || {};

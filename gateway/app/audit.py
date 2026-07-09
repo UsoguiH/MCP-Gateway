@@ -94,7 +94,11 @@ def record(event: str, **fields) -> dict:
         if _SIEM_STREAM is not None:          # mirror to the SIEM feed (WORM/SIEM in prod)
             with open(_SIEM_STREAM, "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        return entry
+    # Notification center: security-relevant events surface in the dashboard's
+    # right panel. Outside _LOCK (its own lock), lazy import (no cycle), never raises.
+    from . import notifications
+    notifications.on_audit_event(entry)
+    return entry
 
 
 def verify_chain() -> tuple[bool, str]:

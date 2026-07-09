@@ -1,11 +1,14 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ShieldAlert, ShieldCheck, CircleAlert, TriangleAlert, Info, Ban, LockOpen,
-  UserX, RotateCw, Check, X, ChevronRight,
+  UserX, RotateCw, Check, X, ChevronRight, MoreHorizontal, UserPlus, KeyRound,
+  LogOut, Shield, Fingerprint,
 } from "lucide-react";
 import { useApi } from "./useApi";
 import { apiGet, apiPost } from "@/api";
 import { toast } from "./toast";
+import { ConfirmModal, Field, GhostBtn, Modal, PrimaryBtn, SecretModal, SelectInput, TextInput } from "./ui";
+import { getUser } from "@/api";
 
 // ── shared SnowUI primitives (match the reference tokens) ─────────────────────
 const STATUS_COLOR: Record<string, string> = { Online: "#4AA785", Degraded: "#E5A000", Offline: "#D9534F" };
@@ -44,22 +47,59 @@ function fmtDate(ts?: number) { return ts ? new Date(ts * 1000).toLocaleString()
 // ══════════════════════════════════════════════════════════════════════════════
 // 1. APPROVALS — the HITL queue (approve / reject, two-person + SoD)
 // ══════════════════════════════════════════════════════════════════════════════
+const APPR_STATUS_COLOR: Record<string, string> = {
+  approved: "#4AA785", rejected: "#D9534F", expired: "#E5A000", pending: "#6B9FD4",
+};
+
 export function ApprovalsPage({ onAuthExpired }: { onAuthExpired: () => void }) {
   const { data, loading, reload } = useApi<{ pending: any[] }>("/api/approvals", onAuthExpired);
+  const [tab, setTab] = useState<"pending" | "history">("pending");
+  const hist = useApi<{ history: any[] }>("/api/approvals/history", onAuthExpired);
   const pending = data?.pending ?? [];
+  const history = hist.data?.history ?? [];
   const act = async (id: string, kind: "approve" | "reject") => {
     try {
       const r = await apiPost(`/api/approvals/${id}/${kind}`);
       toast(kind === "approve"
         ? (r.status === "approved_and_executed" ? "Approved & executed." : `Vote recorded — ${r.remaining} more approval(s) needed.`)
         : "Request rejected.");
-      reload();
+      reload(); hist.reload();
     } catch (e: any) { toast(e.message || "Action failed", "err"); }
   };
   return (
     <>
-      <Head title="Authorization queue" count={loading ? "…" : `${pending.length} pending`} />
-      {pending.length === 0 ? <CardBox><Empty label="Queue clear — no actions awaiting approval." /></CardBox> : (
+      <div className="flex items-center justify-between">
+        <h1 className="text-sm font-semibold text-black">Authorization queue</h1>
+        <div className="flex gap-2">
+          {(["pending", "history"] as const).map((t) => (
+            <button key={t} onClick={() => t === "history" ? (setTab(t), hist.reload()) : setTab(t)}
+              className={`text-xs px-3 py-1 rounded-lg border ${tab === t ? "border-black/20 bg-black/[0.04]" : "border-black/10 hover:bg-black/[0.03]"}`}>
+              {t === "pending" ? `Pending (${pending.length})` : "History"}
+            </button>
+          ))}
+        </div>
+      </div>
+      {tab === "history" ? (
+        history.length === 0 ? <CardBox><Empty label="No resolved approvals yet." /></CardBox> : (
+          <CardBox title="Resolved approvals — who decided what, when">
+            <div className="overflow-x-auto"><table className="w-full">
+              <thead><tr><Th>Action</Th><Th>Requester</Th><Th>Outcome</Th><Th>Signers</Th><Th right>Resolved</Th></tr></thead>
+              <tbody>
+                {history.map((h) => (
+                  <tr key={h.id} className="hover:bg-black/[0.02]">
+                    <Td><span className="font-medium">{h.server}.{h.tool}</span> <TierPill tier={h.tier} /></Td>
+                    <Td>{h.requester}</Td>
+                    <Td><span className="text-xs px-2 py-0.5 rounded-full" style={{ background: (APPR_STATUS_COLOR[h.status] || "#888") + "22", color: APPR_STATUS_COLOR[h.status] || "#888" }}>{h.status}</span></Td>
+                    <Td><span className="text-xs text-black/50">{h.status === "rejected" ? `rejected by ${h.rejected_by || "—"}` : h.status === "expired" ? "auto-expired" : (h.approvals || []).join(", ") || "—"}</span></Td>
+                    <Td right><span className="text-black/60">{fmtDate(h.resolved_at)}</span></Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table></div>
+          </CardBox>
+        )
+      ) : (
+      pending.length === 0 ? <CardBox><Empty label="Queue clear — no actions awaiting approval." /></CardBox> : (
         <div className="flex flex-col gap-3">
           {pending.map((p) => {
             const got = (p.approvals || []).length, need = p.approvals_required || 1;
@@ -87,6 +127,7 @@ export function ApprovalsPage({ onAuthExpired }: { onAuthExpired: () => void }) 
             );
           })}
         </div>
+      )
       )}
     </>
   );
@@ -147,36 +188,137 @@ export function AuditPage({ query, onAuthExpired }: { query: string; onAuthExpir
 // ══════════════════════════════════════════════════════════════════════════════
 // 3. IDENTITIES & ROLES — operator directory, ABAC ladder, revoke / unlock
 // ══════════════════════════════════════════════════════════════════════════════
+function RowMenu({ items }: { items: { label: string; icon: React.ReactNode; danger?: boolean; onClick: () => void }[] }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  return (
+    <div className="relative inline-block" ref={ref}>
+      <button onClick={() => setOpen(!open)} className={`p-1.5 rounded-lg border border-black/10 hover:bg-black/[0.04] ${open ? "bg-black/[0.04]" : ""}`}>
+        <MoreHorizontal size={14} className="text-black/60" />
+      </button>
+      {open && (
+        <div className="absolute right-0 top-8 w-[210px] bg-white border border-black/10 rounded-xl shadow-lg p-1 z-40 flex flex-col">
+          {items.map((it) => (
+            <button key={it.label} onClick={() => { setOpen(false); it.onClick(); }}
+              className="flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-left hover:bg-black/[0.04]"
+              style={it.danger ? { color: "#D9534F" } : { color: "#000" }}>
+              {it.icon} {it.label}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function IdentitiesPage({ query, onAuthExpired }: { query: string; onAuthExpired: () => void }) {
   const ops = useApi<{ operators: any[] }>("/api/admin/operators", onAuthExpired);
   const pol = useApi<{ clearance_order: string[]; roles: Record<string, any> }>("/api/admin/policy", onAuthExpired);
   const mfa = useApi<{ operators: Record<string, boolean> }>("/api/admin/mfa", onAuthExpired);
+  const me = getUser()?.sub;
   const q = query.toLowerCase();
   const rows = (ops.data?.operators ?? []).filter((o) => o.sub.toLowerCase().includes(q) || o.role.toLowerCase().includes(q));
+  const roles = Object.keys(pol.data?.roles || {});
+  const clearances = pol.data?.clearance_order || [];
+
+  const [createOpen, setCreateOpen] = useState(false);
+  const [roleEdit, setRoleEdit] = useState<any | null>(null);
+  const [offboard, setOffboard] = useState<any | null>(null);
+  const [signout, setSignout] = useState<any | null>(null);
+  const [mfaEnroll, setMfaEnroll] = useState<any | null>(null);
+  const [pwReset, setPwReset] = useState<any | null>(null);
+  const [secret, setSecret] = useState<{ title: string; note: string; rows: { label: string; value: string }[] } | null>(null);
+
+  const reloadAll = () => { ops.reload(); mfa.reload(); };
   const act = async (path: string, sub: string, label: string) => {
-    try { await apiPost(path, { sub }); toast(label); ops.reload(); } catch (e: any) { toast(e.message || "Failed", "err"); }
+    try { await apiPost(path, { sub }); toast(label); reloadAll(); } catch (e: any) { toast(e.message || "Failed", "err"); }
   };
+
+  const doOffboard = async () => {
+    if (!offboard) return;
+    try {
+      await apiPost(`/api/admin/operators/${offboard.sub}/offboard`);
+      toast(`${offboard.sub} offboarded — sessions terminated, credentials purged.`);
+      setOffboard(null); reloadAll();
+    } catch (e: any) { toast(e.message || "Failed", "err"); }
+  };
+  const doSignout = async () => {
+    if (!signout) return;
+    try {
+      await apiPost(`/api/admin/operators/${signout.sub}/signout`);
+      toast(`${signout.sub} signed out everywhere — all tokens are dead.`);
+      setSignout(null); reloadAll();
+    } catch (e: any) { toast(e.message || "Failed", "err"); }
+  };
+  const doMfaEnroll = async () => {
+    if (!mfaEnroll) return;
+    const sub = mfaEnroll.sub;
+    setMfaEnroll(null);
+    try {
+      const r = await apiPost(`/api/admin/mfa/${sub}/enroll`);
+      setSecret({
+        title: `Authenticator enrolled — ${sub}`,
+        note: "Add this to the operator's authenticator app now (any TOTP app; enter the secret or the URI).",
+        rows: [{ label: "TOTP secret", value: r.secret }, { label: "otpauth:// URI", value: r.otpauth_uri }],
+      });
+      reloadAll();
+    } catch (e: any) { toast(e.message || "Enroll failed", "err"); }
+  };
+  const doPwReset = async () => {
+    if (!pwReset) return;
+    const sub = pwReset.sub;
+    setPwReset(null);
+    try {
+      const r = await apiPost(`/api/admin/operators/${sub}/reset_password`);
+      setSecret({
+        title: `Temporary password — ${sub}`,
+        note: "Hand it over out-of-band. The operator must rotate it at first login.",
+        rows: [{ label: "Temporary password", value: r.temp_password }],
+      });
+      reloadAll();
+    } catch (e: any) { toast(e.message || "Reset failed", "err"); }
+  };
+
   return (
     <>
-      <Head title="Identities & Roles" count={`${rows.length} operators`} />
-      <CardBox title="Operators">
+      <div className="flex items-center justify-between">
+        <h1 className="text-sm font-semibold text-black">Identities & Roles</h1>
+        <button onClick={() => setCreateOpen(true)}
+          className="text-xs text-white px-3 py-1.5 rounded-lg bg-[#1C1C1C] hover:opacity-80 flex items-center gap-1">
+          <UserPlus size={13} /> New operator
+        </button>
+      </div>
+      <CardBox title="Operators" right={<span className="text-xs text-black/40">{rows.length} operators</span>}>
         <div className="overflow-x-auto"><table className="w-full">
           <thead><tr><Th>Identity</Th><Th>Role</Th><Th>Clearance</Th><Th>Capabilities</Th><Th>MFA</Th><Th>Status</Th><Th right>Actions</Th></tr></thead>
           <tbody>
             {rows.map((o) => (
               <tr key={o.sub} className="hover:bg-black/[0.02]">
-                <Td><span className="font-medium">{o.sub}</span> <span className="text-black/40">· {o.name}</span></Td>
+                <Td><span className="font-medium">{o.sub}</span> <span className="text-black/40">· {o.name}</span>{o.sub === me && <span className="ml-1.5 text-xs px-1.5 py-0.5 rounded-full" style={{ background: "#e6f1fd" }}>you</span>}</Td>
                 <Td><span className="text-black/60">{o.role}</span></Td>
                 <Td><span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "#edeefc" }}>{o.clearance}</span></Td>
                 <Td><span className="text-xs text-black/50">tier ≤ {o.max_tool_tier}{o.can_approve ? " · approver" : ""}{o.admin ? " · admin" : ""}</span></Td>
                 <Td>{mfa.data?.operators?.[o.sub] ? <span style={{ color: "#4AA785" }} className="text-xs">enrolled</span> : <span style={{ color: "#E5A000" }} className="text-xs">missing</span>}</Td>
                 <Td>{o.revoked ? <span className="text-xs" style={{ color: "#D9534F" }}>revoked</span> : o.locked ? <span className="text-xs" style={{ color: "#E5A000" }}>locked ({o.fails})</span> : <span className="text-xs" style={{ color: "#4AA785" }}>active</span>}</Td>
                 <Td right>
-                  <div className="flex gap-1.5 justify-end">
+                  <div className="flex gap-1.5 justify-end items-center">
                     {o.locked && <button onClick={() => act("/api/admin/unlock", o.sub, `Lockout cleared for ${o.sub}`)} className="text-xs px-2.5 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04] flex items-center gap-1"><LockOpen size={12} /> Unlock</button>}
                     {o.revoked
                       ? <button onClick={() => act("/api/admin/unrevoke", o.sub, `${o.sub} restored`)} className="text-xs px-2.5 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04]">Restore</button>
                       : <button onClick={() => act("/api/admin/revoke", o.sub, `${o.sub} revoked`)} className="text-xs px-2.5 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04] flex items-center gap-1" style={{ color: "#D9534F" }}><UserX size={12} /> Revoke</button>}
+                    <RowMenu items={[
+                      { label: "Change role / clearance", icon: <Shield size={13} />, onClick: () => setRoleEdit(o) },
+                      { label: "Enroll / reset MFA", icon: <Fingerprint size={13} />, onClick: () => setMfaEnroll(o) },
+                      { label: "Reset password", icon: <KeyRound size={13} />, onClick: () => setPwReset(o) },
+                      { label: "Sign out everywhere", icon: <LogOut size={13} />, onClick: () => setSignout(o) },
+                      { label: "Offboard operator", icon: <UserX size={13} />, danger: true, onClick: () => setOffboard(o) },
+                    ]} />
                   </div>
                 </Td>
               </tr>
@@ -197,7 +339,126 @@ export function IdentitiesPage({ query, onAuthExpired }: { query: string; onAuth
           ))}
         </div>
       </CardBox>
+
+      {createOpen && (
+        <CreateOperatorModal roles={roles} clearances={clearances}
+          onClose={() => setCreateOpen(false)}
+          onCreated={(r) => {
+            setCreateOpen(false); reloadAll();
+            setSecret({
+              title: `Operator ${r.sub} created`,
+              note: "Hand the temporary password and authenticator enrollment over out-of-band. The password must be rotated at first login.",
+              rows: [
+                { label: "Temporary password", value: r.temp_password },
+                { label: "TOTP secret", value: r.totp_secret },
+                { label: "otpauth:// URI", value: r.otpauth_uri },
+              ],
+            });
+          }} />
+      )}
+      {roleEdit && (
+        <RoleModal op={roleEdit} roles={roles} clearances={clearances}
+          onClose={() => setRoleEdit(null)}
+          onSaved={() => { setRoleEdit(null); reloadAll(); }} />
+      )}
+      {offboard && (
+        <ConfirmModal title={`Offboard ${offboard.sub}?`}
+          body={<>Removes <b>{offboard.sub}</b> from the directory, terminates every session and token, and purges their password and authenticator. Their audit history is kept. This cannot be undone from the UI.</>}
+          confirmLabel="Offboard" onCancel={() => setOffboard(null)} onConfirm={doOffboard} />
+      )}
+      {signout && (
+        <ConfirmModal title={`Sign out ${signout.sub} everywhere?`}
+          body={<>Every console session, OAuth token, refresh token, live MCP session and previously-issued API key for <b>{signout.sub}</b> dies immediately. They can sign back in with their password + authenticator.</>}
+          confirmLabel="Sign out everywhere" onCancel={() => setSignout(null)} onConfirm={doSignout} />
+      )}
+      {mfaEnroll && (
+        <ConfirmModal title={`Enroll authenticator for ${mfaEnroll.sub}?`} danger={false}
+          body={<>Generates a fresh TOTP secret for <b>{mfaEnroll.sub}</b> and shows it once. Any previously enrolled authenticator stops working immediately.</>}
+          confirmLabel="Enroll" onCancel={() => setMfaEnroll(null)} onConfirm={doMfaEnroll} />
+      )}
+      {pwReset && (
+        <ConfirmModal title={`Reset password for ${pwReset.sub}?`} danger={false}
+          body={<>Issues a strong temporary password for <b>{pwReset.sub}</b> (shown once) and forces rotation at their next login. Their current password stops working.</>}
+          confirmLabel="Reset password" onCancel={() => setPwReset(null)} onConfirm={doPwReset} />
+      )}
+      {secret && <SecretModal title={secret.title} note={secret.note} rows={secret.rows} onClose={() => setSecret(null)} />}
     </>
+  );
+}
+
+function CreateOperatorModal({ roles, clearances, onClose, onCreated }: {
+  roles: string[]; clearances: string[]; onClose: () => void; onCreated: (r: any) => void;
+}) {
+  const [sub, setSub] = useState("");
+  const [name, setName] = useState("");
+  const [role, setRole] = useState(roles.includes("employee") ? "employee" : roles[0] || "");
+  const [clearance, setClearance] = useState(clearances.includes("restricted") ? "restricted" : clearances[0] || "");
+  const [busy, setBusy] = useState(false);
+  const create = async () => {
+    if (!sub.trim()) { toast("Username is required", "err"); return; }
+    setBusy(true);
+    try {
+      const r = await apiPost("/api/admin/operators", { sub: sub.trim(), name: name.trim(), role, clearance });
+      onCreated(r);
+    } catch (e: any) { toast(e.message || "Create failed", "err"); }
+    finally { setBusy(false); }
+  };
+  return (
+    <Modal title="New operator" onClose={onClose}>
+      <Field label="Username"><TextInput value={sub} onChange={(e) => setSub(e.target.value)} placeholder="e.g. lina" autoFocus /></Field>
+      <Field label="Display name"><TextInput value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Lina (Analyst)" /></Field>
+      <Field label="Role">
+        <SelectInput value={role} onChange={(e) => setRole(e.target.value)}>
+          {roles.map((r) => <option key={r} value={r}>{r}</option>)}
+        </SelectInput>
+      </Field>
+      <Field label="Clearance">
+        <SelectInput value={clearance} onChange={(e) => setClearance(e.target.value)}>
+          {clearances.map((c) => <option key={c} value={c}>{c}</option>)}
+        </SelectInput>
+      </Field>
+      <p className="text-xs text-black/40 leading-4">A temporary password and authenticator enrollment are generated and shown once — hand them over out-of-band.</p>
+      <div className="flex gap-2 justify-end">
+        <GhostBtn onClick={onClose}>Cancel</GhostBtn>
+        <PrimaryBtn onClick={create} disabled={busy}>{busy ? "Creating…" : "Create operator"}</PrimaryBtn>
+      </div>
+    </Modal>
+  );
+}
+
+function RoleModal({ op, roles, clearances, onClose, onSaved }: {
+  op: any; roles: string[]; clearances: string[]; onClose: () => void; onSaved: () => void;
+}) {
+  const [role, setRole] = useState(op.role);
+  const [clearance, setClearance] = useState(op.clearance);
+  const [busy, setBusy] = useState(false);
+  const save = async () => {
+    setBusy(true);
+    try {
+      await apiPost(`/api/admin/operators/${op.sub}/role`, { role, clearance });
+      toast(`${op.sub} is now ${role} / ${clearance}. Their sessions were terminated.`);
+      onSaved();
+    } catch (e: any) { toast(e.message || "Update failed", "err"); }
+    finally { setBusy(false); }
+  };
+  return (
+    <Modal title={`Change role — ${op.sub}`} onClose={onClose}>
+      <Field label="Role">
+        <SelectInput value={role} onChange={(e) => setRole(e.target.value)}>
+          {roles.map((r) => <option key={r} value={r}>{r}</option>)}
+        </SelectInput>
+      </Field>
+      <Field label="Clearance">
+        <SelectInput value={clearance} onChange={(e) => setClearance(e.target.value)}>
+          {clearances.map((c) => <option key={c} value={c}>{c}</option>)}
+        </SelectInput>
+      </Field>
+      <p className="text-xs text-black/40 leading-4">Applying a role change signs the operator out everywhere so no session keeps the old privileges.</p>
+      <div className="flex gap-2 justify-end">
+        <GhostBtn onClick={onClose}>Cancel</GhostBtn>
+        <PrimaryBtn onClick={save} disabled={busy}>{busy ? "Saving…" : "Apply change"}</PrimaryBtn>
+      </div>
+    </Modal>
   );
 }
 

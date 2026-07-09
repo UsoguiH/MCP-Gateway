@@ -1,6 +1,7 @@
 """FastAPI application — HTTP surface for the gateway and UI (spec §11 Phase 3-4)."""
 import base64
 import os
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
@@ -9,7 +10,7 @@ from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import audit, auth, devclient, mcp_server, oauth
+from . import apikeys, audit, auth, devclient, mcp_server, notifications, oauth
 from .auth import USERS, verify
 from .config import CONFIG, POLICY, ROOT
 from .controls import RateLimiter, kill_switch
@@ -38,11 +39,28 @@ _PROXY_HEADER = _PROXY_CFG.get("header", "x-proxy-auth").lower()
 _login_limiter = RateLimiter(int(CONFIG["auth"].get("login_rate_per_minute", 20)))
 
 
+async def _approval_sweeper(interval_s: int = 300):
+    """Expire overdue approvals + prune resolved ones on a timer, so a stale
+    destructive action is contained even when no approver ever opens the queue."""
+    import asyncio
+    while True:
+        try:
+            await asyncio.sleep(interval_s)
+            _audit_expired_approvals()          # expire + audit; _save() also prunes
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass                                # a sweep must never crash the gateway
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
     await gw.startup()
     audit.record("gateway_startup", servers=list(gw.mcp.servers.keys()))
+    sweeper = asyncio.create_task(_approval_sweeper())
     yield
+    sweeper.cancel()
     await gw.shutdown()
 
 
@@ -150,9 +168,12 @@ def mcp_principal(request: Request, authorization: str = Header(default=""),
         raise HTTPException(401, "authorization required",
                             headers={"WWW-Authenticate": challenge})
     token = authorization[7:]
-    claims = verify(token, x_client_cert_thumbprint or None)     # cert-bound session
-    if not claims:
-        claims = auth.verify_oauth_access(token)                 # OAuth bearer
+    if token.startswith("mcpk_"):
+        claims = apikeys.verify(token)                           # scoped API key
+    else:
+        claims = verify(token, x_client_cert_thumbprint or None)  # cert-bound session
+        if not claims:
+            claims = auth.verify_oauth_access(token)             # OAuth bearer
     if not claims:
         raise HTTPException(401, "invalid, expired, or revoked token",
                             headers={"WWW-Authenticate": challenge})
@@ -213,6 +234,40 @@ class RevokeReq(BaseModel):
 class ConnectTokenReq(BaseModel):
     # optional label so a user can name the client they're pasting the token into
     label: str = ""
+
+
+class ApiKeyReq(BaseModel):
+    name: str
+    sub: str                 # operator the key acts as (capped by their role)
+    scope: str = "read"      # read | standard | full (extra tier cap on top of role)
+    ttl_days: int | None = None
+
+
+class OperatorCreateReq(BaseModel):
+    sub: str
+    name: str = ""
+    role: str = "employee"
+    clearance: str = "restricted"
+
+
+class OperatorRoleReq(BaseModel):
+    role: str | None = None
+    clearance: str | None = None
+    name: str | None = None
+
+
+class ServerAddReq(BaseModel):
+    name: str
+    command: str = ""
+    args: list[str] = []
+    transport: str = "stdio"     # stdio | http
+    url: str = ""
+    env: dict[str, str] = {}
+
+
+class NotifReadReq(BaseModel):
+    ids: list[str] = []
+    all: bool = False
 
 
 def _user_view(claims: dict) -> dict:
@@ -469,7 +524,10 @@ async def oauth_register(request: Request):
         return JSONResponse({"error": "invalid_client_metadata",
                              "error_description": "body must be JSON"}, status_code=400)
     try:
-        return JSONResponse(oauth.register_client(payload), status_code=201)
+        rec = oauth.register_client(payload)
+        audit.record("oauth_client_registered", client_id=rec["client_id"],
+                     client_name=rec.get("client_name", ""))
+        return JSONResponse(rec, status_code=201)
     except oauth.OAuthError as e:
         return _oauth_error(e)
 
@@ -482,50 +540,86 @@ def _authorize_page(params: dict, error: str = "") -> HTMLResponse:
         f'<input type="hidden" name="{k}" value="{_html.escape(v)}">'
         for k, v in params.items() if v)
     client = oauth.get_client(params.get("client_id", ""))
-    client_name = _html.escape(client.get("client_name") or "an AI client") if client else "an AI client"
-    err_html = f'<p class="err">{_html.escape(error)}</p>' if error else ""
-    mfa_field = (
-        '<label>Authenticator code (MFA)'
-        '<input name="otp" inputmode="numeric" autocomplete="one-time-code" '
-        'pattern="[0-9]*" placeholder="123456"></label>'
-        if CONFIG["auth"].get("require_mfa", False) else "")
-    return HTMLResponse(f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Authorize AI access</title>
+    client_name = _html.escape(client.get("client_name") or "عميل ذكاء اصطناعي") if client else "عميل ذكاء اصطناعي"
+    err_html = f'<p class="animate-element err" style="animation-delay:.25s">{_html.escape(error)}</p>' if error else ""
+    mfa_field = ("""
+<div class="animate-element field" style="animation-delay:.5s">
+  <label>رمز المصادقة</label>
+  <div class="glass"><input name="otp" inputmode="numeric" autocomplete="one-time-code"
+    pattern="[0-9]*" maxlength="6" placeholder="000000" class="otp"></div>
+</div>""" if CONFIG["auth"].get("require_mfa", False) else "")
+    # Exact visual clone of the dashboard login (Login.tsx): white RTL page,
+    # glass inputs, green CTA, staggered entrance animation — different backend.
+    return HTMLResponse(f"""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>تفويض وصول الذكاء الاصطناعي</title>
 <style>
-:root{{color-scheme:light dark}}
-*{{box-sizing:border-box}}
-body{{margin:0;min-height:100vh;display:grid;place-items:center;
- font-family:"Segoe UI",system-ui,sans-serif;background:#0f1720;color:#e8ecf0}}
-.card{{width:min(400px,92vw);background:#1a2330;border:1px solid #2a3644;border-radius:16px;
- padding:32px 30px;box-shadow:0 12px 40px rgba(0,0,0,.4)}}
-h1{{font-size:19px;margin:0 0 4px}}
-.sub{{color:#9fb0c0;font-size:13.5px;margin:0 0 22px;line-height:1.5}}
-.sub b{{color:#e8ecf0}}
-label{{display:block;font-size:12.5px;color:#9fb0c0;margin:14px 0 0;font-weight:600}}
-input{{width:100%;margin-top:6px;padding:11px 13px;font-size:15px;border-radius:9px;
- border:1px solid #33414f;background:#0f1720;color:#e8ecf0}}
-input:focus{{outline:2px solid #2f81f7;border-color:#2f81f7}}
-button{{width:100%;margin-top:22px;padding:12px;font-size:15px;font-weight:600;border:0;
- border-radius:9px;background:#2f81f7;color:#fff;cursor:pointer}}
-button:hover{{background:#2a72db}}
-.err{{background:#3a1720;border:1px solid #6b2434;color:#ffb3bf;padding:10px 12px;
- border-radius:9px;font-size:13px;margin:0 0 12px}}
-.lock{{font-size:26px;text-align:center;margin-bottom:6px}}
-.foot{{margin-top:18px;font-size:11.5px;color:#6b7c8c;text-align:center;line-height:1.5}}
-</style></head><body><form class="card" method="post" action="/oauth/authorize">
-<div class="lock">🔐</div>
-<h1>Authorize AI access</h1>
-<p class="sub"><b>{client_name}</b> wants to access internal systems <b>as you</b>, through the
-secure gateway. Sign in to approve — every tool call it makes will still be checked,
-masked and audited under your name.</p>
-{err_html}
-{hidden}
-<label>Username<input name="username" autocomplete="username" autofocus required></label>
-<label>Password<input name="password" type="password" autocomplete="current-password" required></label>
-{mfa_field}
-<button type="submit">Sign in &amp; authorize</button>
-<p class="foot">You are approving access for your own account only. Close this tab to cancel.</p>
-</form></body></html>""")
+*{{box-sizing:border-box;margin:0}}
+body{{min-height:100vh;display:flex;align-items:center;justify-content:center;background:#fff;
+ color:#111827;text-align:right;font-family:Inter,"Segoe UI",system-ui,sans-serif}}
+@keyframes elementIn{{from{{opacity:0;transform:translateY(24px)}}to{{opacity:1;transform:translateY(0)}}}}
+.animate-element{{animation:elementIn .9s cubic-bezier(0.16,1,0.3,1) both}}
+section{{width:100%;max-width:28rem;padding:2rem;display:flex;flex-direction:column;gap:1.5rem}}
+h1{{font-size:2.75rem;font-weight:300;color:#111827;letter-spacing:-.05em;line-height:1.15}}
+.sub{{color:#6b7280;line-height:1.6;font-size:.95rem}}
+.sub b{{color:#111827;font-weight:600}}
+form{{display:flex;flex-direction:column;gap:1.25rem}}
+label{{display:block;font-size:.875rem;font-weight:500;color:#6b7280}}
+.glass{{margin-top:.25rem;border-radius:1rem;border:1px solid #e5e7eb;background:rgba(17,24,39,.05);
+ backdrop-filter:blur(4px);transition:border-color .15s,background .15s;position:relative}}
+.glass:focus-within{{border-color:rgba(74,222,128,.7);background:rgba(34,197,94,.1)}}
+input{{width:100%;background:transparent;font-size:.875rem;padding:1rem;border:0;border-radius:1rem;
+ outline:none;text-align:right;color:#111827;font-family:inherit}}
+input.pw{{padding-left:3rem}}
+input.otp{{font-size:1.125rem;text-align:center;letter-spacing:.4em}}
+.eye{{position:absolute;top:0;bottom:0;left:.75rem;display:flex;align-items:center;border:0;
+ background:none;cursor:pointer;color:#6b7280;padding:0}}
+.eye:hover{{color:#111827}}
+.eye svg{{width:1.25rem;height:1.25rem}}
+.err{{font-size:.875rem;color:#ef4444}}
+button.cta{{width:100%;border:0;border-radius:1rem;background:#16a34a;padding:1rem;font-size:1rem;
+ font-weight:500;color:#fff;cursor:pointer;transition:background .15s;font-family:inherit}}
+button.cta:hover{{background:#15803d}}
+.foot{{text-align:center;font-size:.75rem;color:#9ca3af;line-height:1.6}}
+</style></head><body>
+<section>
+  <h1 class="animate-element" style="animation-delay:.1s">مرحباً</h1>
+  <p class="animate-element sub" style="animation-delay:.2s"><b>{client_name}</b> يطلب الوصول إلى
+  الأنظمة الداخلية <b>بحسابك أنت</b> عبر البوابة الآمنة. سجّل الدخول للموافقة — كل استدعاء يقوم به
+  سيبقى مُدقَّقاً ومُسجَّلاً باسمك.</p>
+  {err_html}
+  <form method="post" action="/oauth/authorize">
+    {hidden}
+    <div class="animate-element field" style="animation-delay:.3s">
+      <label>اسم المستخدم</label>
+      <div class="glass"><input name="username" autocomplete="username" autofocus required
+        placeholder="أدخل اسم المستخدم"></div>
+    </div>
+    <div class="animate-element field" style="animation-delay:.4s">
+      <label>كلمة المرور</label>
+      <div class="glass">
+        <input name="password" id="pw" type="password" autocomplete="current-password" required
+          placeholder="أدخل كلمة المرور" class="pw">
+        <button type="button" class="eye" id="eyeBtn" aria-label="إظهار كلمة المرور">
+          <svg id="eyeIcon" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    {mfa_field}
+    <button type="submit" class="animate-element cta" style="animation-delay:.6s">تسجيل الدخول والموافقة</button>
+  </form>
+  <p class="animate-element foot" style="animation-delay:.7s">أنت توافق على الوصول لحسابك فقط. أغلق هذه الصفحة للإلغاء.</p>
+</section>
+<script>
+document.getElementById("eyeBtn").addEventListener("click",function(){{
+  var pw=document.getElementById("pw");
+  pw.type=pw.type==="password"?"text":"password";
+  this.style.color=pw.type==="text"?"#111827":"#6b7280";
+}});
+</script>
+</body></html>""")
 
 
 _AUTHZ_PARAM_KEYS = ("response_type", "client_id", "redirect_uri", "code_challenge",
@@ -666,10 +760,20 @@ def connect_status(claims: dict = Depends(current_user)):
 
 
 # ---------- approvals (HITL) ----------
+def _audit_expired_approvals():
+    """Expire overdue requests and put each on the audit chain (which also lands
+    them in the notification panel)."""
+    for e in gw.approvals.expire_stale():
+        audit.record("approval_expired", approval_id=e["id"], requester=e["requester"],
+                     server=e["server"], tool=e["tool"], tier=e["tier"],
+                     waited_hours=round((time.time() - e.get("created", 0)) / 3600, 1))
+
+
 @app.get("/api/approvals")
 def list_approvals(claims: dict = Depends(current_user)):
     if not POLICY["roles"].get(claims["role"], {}).get("can_approve"):
         raise HTTPException(403, "approver role required")
+    _audit_expired_approvals()
     return {"pending": gw.approvals.list_pending()}
 
 
@@ -707,6 +811,16 @@ def reject(aid: str, claims: dict = Depends(current_user)):
     return {"status": "rejected", "approval": result}
 
 
+@app.get("/api/approvals/history")
+def approvals_history(limit: int = 200, claims: dict = Depends(current_user)):
+    """Resolved approvals (approved / rejected / expired) — who decided what, when,
+    both signers — for the approver console and compliance."""
+    if not POLICY["roles"].get(claims["role"], {}).get("can_approve"):
+        raise HTTPException(403, "approver role required")
+    _audit_expired_approvals()
+    return {"history": gw.approvals.history(limit)}
+
+
 # ---------- admin: kill switch, audit, registry ----------
 @app.get("/api/admin/killswitch")
 def killswitch_status(claims: dict = Depends(require_admin)):
@@ -737,7 +851,12 @@ def revoke_identity(req: RevokeReq, claims: dict = Depends(require_admin)):
     """Identity kill-switch: block a subject within one request (<1s), independent
     of token lifetime. Rejects new logins and in-flight tokens for that subject."""
     auth.revoke_subject(req.sub)
-    audit.record("identity_revoked", sub=req.sub, by=claims["sub"])
+    cancelled = gw.approvals.reject_all_for(req.sub, by=claims["sub"])
+    for a in cancelled:
+        audit.record("approval_cancelled", approval_id=a["id"], requester=req.sub,
+                     reason="requester revoked", by=claims["sub"])
+    audit.record("identity_revoked", sub=req.sub, by=claims["sub"],
+                 approvals_cancelled=len(cancelled))
     return {"revoked": auth.revoked()}
 
 
@@ -820,6 +939,284 @@ def mfa_status(claims: dict = Depends(require_admin)):
             "operators": {u: auth.mfa_enrolled(u) for u in USERS}}
 
 
+# ---------- admin: API keys (real issue/revoke — keys work on /mcp) ----------
+@app.get("/api/admin/apikeys")
+def apikeys_list(claims: dict = Depends(require_admin)):
+    return {"keys": apikeys.list_keys(), "scopes": sorted(apikeys.SCOPES)}
+
+
+@app.post("/api/admin/apikeys")
+def apikeys_create(req: ApiKeyReq, claims: dict = Depends(require_admin)):
+    """Issue a scoped API key bound to an operator. The full token is returned ONCE
+    and stored only as a hash."""
+    if req.sub not in USERS:
+        raise HTTPException(404, "unknown operator")
+    try:
+        rec, token = apikeys.issue(req.name, req.sub, req.scope, req.ttl_days, claims["sub"])
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    audit.record("apikey_created", kid=rec["kid"], name=rec["name"], sub=req.sub,
+                 scope=req.scope, ttl_days=req.ttl_days, by=claims["sub"])
+    return {"key": {k: v for k, v in rec.items() if k != "hash"}, "token": token,
+            "note": "displayed once — store it in your CI secret manager now"}
+
+
+@app.post("/api/admin/apikeys/{kid}/revoke")
+def apikeys_revoke(kid: str, claims: dict = Depends(require_admin)):
+    rec = apikeys.revoke(kid)
+    if not rec:
+        raise HTTPException(404, "unknown key")
+    audit.record("apikey_revoked", kid=kid, name=rec["name"], by=claims["sub"])
+    return {"revoked": kid}
+
+
+# ---------- admin: OAuth clients (list + revoke registered MCP clients) ----------
+@app.get("/api/admin/oauth/clients")
+def oauth_clients(claims: dict = Depends(require_admin)):
+    return {"clients": oauth.list_clients()}
+
+
+@app.post("/api/admin/oauth/clients/{client_id}/revoke")
+def oauth_client_revoke(client_id: str, claims: dict = Depends(require_admin)):
+    """Delete a client registration and kill all its refresh tokens. Outstanding
+    access tokens (<=1h TTL) expire on their own and cannot be renewed."""
+    rec = oauth.revoke_client(client_id)
+    if rec is None:
+        raise HTTPException(404, "unknown client")
+    audit.record("oauth_client_revoked", client_id=client_id,
+                 client_name=rec.get("client_name", ""),
+                 refresh_tokens_revoked=rec.get("refresh_tokens_revoked", 0), by=claims["sub"])
+    return {"revoked": client_id, "refresh_tokens_revoked": rec.get("refresh_tokens_revoked", 0)}
+
+
+# ---------- admin: operator lifecycle ----------
+def _admin_count() -> int:
+    return sum(1 for u in USERS.values() if POLICY["roles"].get(u["role"], {}).get("admin"))
+
+
+@app.post("/api/admin/operators")
+def operator_create(req: OperatorCreateReq, claims: dict = Depends(require_admin)):
+    """Full onboarding in one step: create the operator, seed a temporary password
+    (returned ONCE, rotation forced at first login) and enroll their authenticator
+    (otpauth URI returned ONCE for out-of-band handover)."""
+    ok, msg = auth.create_operator(req.sub, req.name, req.role, req.clearance)
+    if not ok:
+        raise HTTPException(400, msg)
+    sub = req.sub.strip().lower()
+    temp_pw, err = auth.reset_password(sub)
+    if err:
+        raise HTTPException(500, f"operator created but password seeding failed: {err}")
+    secret, uri = auth.enroll_totp(sub)
+    audit.record("operator_created", sub=sub, role=req.role, clearance=req.clearance,
+                 by=claims["sub"])
+    return {"sub": sub, "temp_password": temp_pw, "totp_secret": secret,
+            "otpauth_uri": uri,
+            "note": "hand the password + authenticator over out-of-band; shown once"}
+
+
+@app.post("/api/admin/operators/{sub}/offboard")
+def operator_offboard(sub: str, claims: dict = Depends(require_admin)):
+    if sub == claims["sub"]:
+        raise HTTPException(400, "you cannot offboard yourself")
+    u = USERS.get(sub)
+    if not u:
+        raise HTTPException(404, "unknown operator")
+    if POLICY["roles"].get(u["role"], {}).get("admin") and _admin_count() <= 1:
+        raise HTTPException(400, "cannot offboard the last admin")
+    ok, msg = auth.remove_operator(sub)
+    if not ok:
+        raise HTTPException(400, msg)
+    cancelled = gw.approvals.reject_all_for(sub, by=claims["sub"])
+    for a in cancelled:
+        audit.record("approval_cancelled", approval_id=a["id"], requester=sub,
+                     reason="requester offboarded", by=claims["sub"])
+    audit.record("operator_offboarded", sub=sub, by=claims["sub"],
+                 approvals_cancelled=len(cancelled))
+    return {"offboarded": sub, "approvals_cancelled": len(cancelled)}
+
+
+@app.post("/api/admin/operators/{sub}/role")
+def operator_role(sub: str, req: OperatorRoleReq, claims: dict = Depends(require_admin)):
+    u = USERS.get(sub)
+    if not u:
+        raise HTTPException(404, "unknown operator")
+    old_role, old_clearance = u["role"], u["clearance"]
+    demoting = POLICY["roles"].get(old_role, {}).get("admin") and \
+        req.role is not None and not POLICY["roles"].get(req.role, {}).get("admin")
+    if demoting and sub == claims["sub"]:
+        raise HTTPException(400, "you cannot remove your own admin role")
+    if demoting and _admin_count() <= 1:
+        raise HTTPException(400, "cannot demote the last admin")
+    ok, msg = auth.update_operator(sub, role=req.role, clearance=req.clearance, name=req.name)
+    if not ok:
+        raise HTTPException(400, msg)
+    audit.record("operator_role_changed", sub=sub, old_role=old_role,
+                 old_clearance=old_clearance, role=USERS[sub]["role"],
+                 clearance=USERS[sub]["clearance"], by=claims["sub"])
+    # a role change must not ride on old tokens minted with the old role
+    auth.terminate_sessions(sub)
+    return {"sub": sub, "role": USERS[sub]["role"], "clearance": USERS[sub]["clearance"]}
+
+
+@app.post("/api/admin/operators/{sub}/reset_password")
+def operator_reset_password(sub: str, claims: dict = Depends(require_admin)):
+    """Issue a temporary password (returned ONCE); rotation forced at next login."""
+    temp_pw, err = auth.reset_password(sub)
+    if err:
+        raise HTTPException(404 if "unknown" in err else 400, err)
+    audit.record("password_reset_forced", sub=sub, by=claims["sub"])
+    return {"sub": sub, "temp_password": temp_pw,
+            "note": "hand over out-of-band; shown once, must be rotated at first login"}
+
+
+@app.post("/api/admin/operators/{sub}/signout")
+def operator_signout(sub: str, claims: dict = Depends(require_admin)):
+    """Sign a subject out everywhere: console sessions, OAuth access + refresh
+    tokens, API keys issued before now, and live MCP sessions."""
+    if sub not in USERS:
+        raise HTTPException(404, "unknown operator")
+    auth.terminate_sessions(sub)
+    audit.record("sessions_terminated", sub=sub, by=claims["sub"])
+    return {"signed_out": sub}
+
+
+@app.post("/api/admin/sessions/{sid}/terminate")
+def session_terminate(sid: str, claims: dict = Depends(require_admin)):
+    """Kill one live inbound MCP session (by the 12-char id shown in the console)."""
+    got = mcp_server.terminate(sid)
+    if not got:
+        raise HTTPException(404, "unknown session")
+    audit.record("mcp_session_terminated", sid=got["id"], sub=got["sub"], by=claims["sub"])
+    return {"terminated": got}
+
+
+# ---------- admin: server lifecycle & containment ----------
+def _server_or_404(name: str):
+    srv = gw.mcp.servers.get(name)
+    if not srv:
+        raise HTTPException(404, "unknown server")
+    return srv
+
+
+@app.post("/api/admin/servers/{name}/restart")
+async def server_restart(name: str, claims: dict = Depends(require_admin)):
+    _server_or_404(name)
+    try:
+        await gw.mcp.restart_server(name)
+    except Exception as e:
+        audit.record("server_restart_failed", server=name, by=claims["sub"], error=str(e)[:200])
+        raise HTTPException(502, f"restart failed: {e}")
+    gw.reset_breaker(name)
+    gw.registry.reconcile(gw.mcp.all_tools())
+    audit.record("server_restarted", server=name, by=claims["sub"])
+    return {"server": name, "state": "running"}
+
+
+@app.post("/api/admin/servers/{name}/stop")
+async def server_stop(name: str, claims: dict = Depends(require_admin)):
+    _server_or_404(name)
+    await gw.mcp.stop_server(name)
+    audit.record("server_stopped", server=name, by=claims["sub"])
+    return {"server": name, "state": "stopped"}
+
+
+@app.post("/api/admin/servers/{name}/start")
+async def server_start(name: str, claims: dict = Depends(require_admin)):
+    _server_or_404(name)
+    try:
+        await gw.mcp.start_server(name)
+    except Exception as e:
+        audit.record("server_start_failed", server=name, by=claims["sub"], error=str(e)[:200])
+        raise HTTPException(502, f"start failed: {e}")
+    gw.reset_breaker(name)
+    gw.registry.reconcile(gw.mcp.all_tools())
+    audit.record("server_started", server=name, by=claims["sub"])
+    return {"server": name, "state": "running"}
+
+
+@app.post("/api/admin/servers/{name}/drain")
+def server_drain(name: str, claims: dict = Depends(require_admin)):
+    _server_or_404(name)
+    gw.drain(name)
+    audit.record("server_drained", server=name, by=claims["sub"])
+    return {"server": name, "drained": True}
+
+
+@app.post("/api/admin/servers/{name}/undrain")
+def server_undrain(name: str, claims: dict = Depends(require_admin)):
+    _server_or_404(name)
+    gw.undrain(name)
+    audit.record("server_undrained", server=name, by=claims["sub"])
+    return {"server": name, "drained": False}
+
+
+@app.post("/api/admin/servers/{name}/breaker_reset")
+def server_breaker_reset(name: str, claims: dict = Depends(require_admin)):
+    _server_or_404(name)
+    gw.reset_breaker(name)
+    audit.record("breaker_reset", server=name, by=claims["sub"])
+    return {"server": name, "breaker_open": False}
+
+
+@app.post("/api/admin/servers/add")
+async def server_add(req: ServerAddReq, claims: dict = Depends(require_admin)):
+    """Connect a new MCP server at runtime and persist it (no config.yaml edit, no
+    gateway restart). Its tools enter the registry through the normal onboarding
+    gate (pending until approved, when the gate is on)."""
+    if req.transport == "stdio" and not req.command:
+        raise HTTPException(400, "stdio servers need a command")
+    if req.transport == "http" and not req.url:
+        raise HTTPException(400, "http servers need a url")
+    if req.transport not in ("stdio", "http"):
+        raise HTTPException(400, "transport must be stdio or http")
+    spec = {"name": req.name.strip(), "command": req.command, "args": req.args,
+            "transport": req.transport, "env": req.env}
+    if req.url:
+        spec["url"] = req.url
+    try:
+        srv = await gw.mcp.add_server(spec)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, f"server failed to start: {e}")
+    events = gw.registry.reconcile(gw.mcp.all_tools())
+    for e in events:
+        audit.record("registry_event", **e)
+    audit.record("server_added", server=srv.name, transport=req.transport,
+                 tools=len(srv.tools), by=claims["sub"])
+    return {"server": srv.name, "state": srv.state, "tools": len(srv.tools),
+            "pending_tools": len([e for e in events if e.get("status") == "pending"])}
+
+
+@app.post("/api/admin/servers/{name}/remove")
+async def server_remove(name: str, claims: dict = Depends(require_admin)):
+    _server_or_404(name)
+    await gw.mcp.remove_server(name)
+    gw.undrain(name)
+    gw.reset_breaker(name)
+    audit.record("server_removed", server=name, by=claims["sub"])
+    return {"removed": name}
+
+
+# ---------- admin: notification center (the dashboard right panel) ----------
+@app.get("/api/admin/notifications")
+def notifications_list(limit: int = 100, claims: dict = Depends(require_admin)):
+    return {"notifications": notifications.list_all(limit),
+            "unread": notifications.unread_count()}
+
+
+@app.post("/api/admin/notifications/read")
+def notifications_read(req: NotifReadReq, claims: dict = Depends(require_admin)):
+    changed = notifications.mark_read(req.ids, mark_all=req.all)
+    return {"marked_read": changed, "unread": notifications.unread_count()}
+
+
+@app.post("/api/admin/notifications/clear")
+def notifications_clear(claims: dict = Depends(require_admin)):
+    return {"cleared": notifications.clear_read(),
+            "unread": notifications.unread_count()}
+
+
 @app.get("/api/admin/vault")
 def vault_leases(claims: dict = Depends(require_admin)):
     from .vault import vault
@@ -879,6 +1276,8 @@ def servers_view(claims: dict = Depends(require_admin)):
         b = gw._breaker.get(name, {})
         out.append({
             "name": name, "tools": len(srv.tools),
+            "state": srv.state, "drained": name in gw.drained,
+            "transport": srv.transport, "started_at": srv.started_at,
             "breaker_open": gw._breaker_open(name), "fails": b.get("fails", 0),
             "tiers": {str(t): sum(1 for e in entries if e["tier"] == t) for t in range(4)},
             "active": sum(1 for e in entries if e["status"] == "active"),

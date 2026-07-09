@@ -77,14 +77,14 @@ export function LoginScreen({ onDone }: { onDone: (u: User) => void }) {
           {step === "creds" ? (
             <form className="space-y-5" onSubmit={onSignIn}>
               <div className="animate-element" style={{ animationDelay: "0.3s" }}>
-                <label className="text-sm font-medium text-gray-500">البريد الإلكتروني</label>
+                <label className="text-sm font-medium text-gray-500">اسم المستخدم</label>
                 <GlassInputWrapper>
                   <input
                     autoFocus
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     type="text"
-                    placeholder="أدخل بريدك الإلكتروني"
+                    placeholder="أدخل اسم المستخدم"
                     className="w-full bg-transparent text-sm p-4 rounded-2xl focus:outline-none text-right"
                   />
                 </GlassInputWrapper>

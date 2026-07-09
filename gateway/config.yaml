@@ -48,7 +48,8 @@ auth:
   # Origin allow-list for the DNS-rebinding defense (MCP spec MUST). Real default
   # (not "*") so the guard is active; add your gateway origins in production.
   allowed_origins: ["http://127.0.0.1:8800", "http://localhost:8800",
-                    "https://localhost:8443", "https://gateway.internal:8443"]
+                    "https://localhost:8443", "https://gateway.internal:8443",
+                    "http://host.docker.internal:8800"]   # dev: dockerized browser QA
   # Trusted-proxy enforcement (production). When enabled the gateway refuses any
   # /api or /mcp request that does not carry the shared secret the mTLS terminator
   # injects — so the app can never be reached directly, bypassing TLS + client-cert
@@ -70,6 +71,14 @@ auth:
     refresh_ttl_seconds: 2592000        # refresh token lifetime (30 days), rotated per use
     code_ttl_seconds: 60                # authorization code validity (single-use)
     manual_token_ttl_seconds: 28800     # "Connect your AI" manual paste-in token (8h)
+
+# HITL approval lifecycle: a request nobody approves within pending_ttl_hours
+# auto-expires (stale destructive actions must not be rubber-stampable later);
+# resolved entries are kept retention_hours so the requester can fetch the
+# result, then pruned so approvals.json cannot grow without bound.
+approvals:
+  pending_ttl_hours: 24
+  retention_hours: 72
 
 gateway:
   host: "127.0.0.1"
@@ -147,4 +156,12 @@ servers:
       DOCS_MAX_FILE_BYTES: "2000000"
       DOCS_MAX_RESULTS: "50"
       DOCS_SEARCH_MAX_FILES: "400"
+  # Saudi Open Data Portal connector (open.data.gov.sa). Read-only public data:
+  # 9 tools (search/get/list/preview/download). Standalone repo lives at
+  # ../opendata-mcp; the .py path resolves relative to the gateway ROOT.
+  - name: opendata
+    command: python
+    args: ["../opendata-mcp/server.py"]
+    env:
+      ODP_LANG: "en"
 

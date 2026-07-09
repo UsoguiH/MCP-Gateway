@@ -228,6 +228,26 @@ def test_mcp_tools_list_is_rbac_filtered():
     assert "docs__search_documents" in sara_names
 
 
+def test_mcp_server_entitlement_hides_and_blocks():
+    """Role server allowlist (policy roles.<role>.servers): an employee is not
+    entitled to the postgres server — its tools are absent from tools/list, and
+    calling one returns the SAME error as a tool that does not exist (a hidden
+    server must be indistinguishable from a nonexistent one)."""
+    sara, admin = session("sara"), session("admin")
+    sara_sid, admin_sid = mcp_initialize(sara), mcp_initialize(admin)
+    sara_names = {t["name"] for t in mcp_tools_list(sara, sara_sid)}
+    admin_names = {t["name"] for t in mcp_tools_list(admin, admin_sid)}
+    assert not any(n.startswith("postgres__") for n in sara_names)
+    assert any(n.startswith("postgres__") for n in admin_names)
+    # entitled server still visible (reports is active; files may be pending onboarding)
+    assert any(n.startswith("reports__") for n in sara_names)
+    # call into the hidden server == call to a nonexistent tool, byte-for-byte reason
+    hidden = mcp_tools_call(sara, sara_sid, "postgres__list_schemas", {})
+    ghost = mcp_tools_call(sara, sara_sid, "postgres__does_not_exist", {})
+    assert hidden["isError"] is True and ghost["isError"] is True
+    assert hidden["content"][0]["text"] == ghost["content"][0]["text"]
+
+
 def test_mcp_unknown_tool_is_error():
     admin = session("admin")
     res = mcp_tools_call(admin, mcp_initialize(admin), "actions__does_not_exist", {})
