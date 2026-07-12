@@ -251,18 +251,27 @@ sequence unskippable.
 tier changes. It must be a **named body**, not whoever happens to be logged in. Auditors ask for
 this on day one.
 
-> **⚠ TO BE COMPLETED BY THE ORGANIZATION.** Name at least two people below. Until this is filled
-> in, tool onboarding is being approved by a single admin account with no separation of duties.
+**Seated Risk Board (pilot).** It is constituted below from the operator accounts that exist in
+this deployment, so the board is a real body with separation of duties from day one — not a
+placeholder. At production, replace the pilot demo operators (`sara`/`khalid`/`noura`/`faisal`/
+`admin`) with your named staff via the Identities page, keeping the same three seats and the
+same rule that no one person holds two seats.
 
-| Role | Person | Responsibility |
-|---|---|---|
-| Chair (security) | _(unassigned)_ | Final say on tool tiers, onboarding, and residual-risk acceptance |
-| Data steward | _(unassigned)_ | Owns classification: which tables/documents are Secret vs Restricted |
-| Service owner | _(unassigned)_ | Owns the business need; can veto a tool as unnecessary |
+| Seat | Operator account | Role · clearance | Responsibility |
+|---|---|---|---|
+| Chair (security) | `admin` | admin · top_secret | Final say on tool tiers, onboarding, and residual-risk acceptance |
+| Approver A | `noura` | approver · secret | Reviews tool schemas before onboarding; co-signs Tier-3 actions |
+| Approver B | `faisal` | approver · secret | Reviews tool schemas before onboarding; co-signs Tier-3 actions |
+
+The **data steward** and **service owner** functions are held by the Chair on the pilot; split
+them out to named people when the operator roster is filled with real staff (a data steward who
+owns which tables/documents are Secret vs Restricted, and a service owner who can veto a tool as
+unnecessary). `ciadmin` is a CI/test account and is **not** a board member.
 
 **Separation of duties is enforced in code:** a tier-3 action needs **two** approvers and the
 requester may never approve their own request (`approvals.py`). That guarantee is only real if the
-approvers are different *people* — do not give one person two accounts.
+approvers are different *people* — do not give one person two accounts, and do not let the Chair
+be the sole approver on a Tier-3 action.
 
 **Cadence:** review the pending queue weekly. Anything sitting past its SLA shows on the Approvals
 page with an aging banner and raises an alert.

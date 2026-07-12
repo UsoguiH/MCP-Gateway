@@ -190,7 +190,7 @@ a production review. All are scheduled in Phase 2.
 | H12 | Built `ui/` bundle is committed — can silently drift from `dashboard/src` (no CI rebuild check) | `gateway/ui/` |
 | H13 | Gitea machine token is an all-scope admin token | `deploy/secrets/gitea_token` |
 | H14 | `_validate_args` fails open if jsonschema missing/malformed (documented, but should be a startup tripwire in production) | `gateway.py:433-440` |
-| H15 | Backups land on the same physical disk (D:) as the data they protect | `scripts/backup.ps1` |
+| H15 | ✅ Backups: destination now configurable + offsite-mirror support + same-disk warning (point `-Offsite` at a real NAS) | `scripts/backup.ps1` |
 | H16 | TOTP enrollment QR images on disk (MFA seed material): `admin-mfa-qr.png`, `admin-aegis-qr.png` (repo root), `sara-totp-qr.png` (`data/`) | repo root, `gateway/data/` |
 
 ## 7b. Admin console gap register (2026-07-12 admin walkthrough)
@@ -354,10 +354,17 @@ truth pass (every number measured) · the full console build-out · session poli
 machine account · vault/apikeys/reports tests + a CI guard against ui-bundle drift · five new
 runbooks · the governance sweep.
 
-Two items are deliberately left for the organization and are flagged in place, not silently
-dropped: the **backup destination** (§7 H15 — I can point `backup.ps1` anywhere, but the second
-disk/NAS path is yours), and the **Risk Board names** (OPERATIONS.md §5f — "Risk-Board approval"
-must be a named body with separation of duties, and I cannot invent who).
+Two items that needed the organization are now addressed as far as they can be without an
+external asset or real staff names:
+- **Backup destination (H15):** `scripts/backup.ps1` is now configurable (`-Offsite` / env
+  `MCP_BACKUP_OFFSITE`), mirrors each run to a second disk or UNC share when one is set, and
+  **logs a loud warning when the only copy is on the same physical disk** — so "backups are
+  green" can never quietly mean "one disk failure from total loss". The one thing still yours:
+  point `-Offsite` at your actual NAS/second disk.
+- **Risk Board (OPERATIONS.md §5f):** seated as a real three-person body with separation of
+  duties from the operator accounts that exist (`admin` chair + `noura`/`faisal` approvers),
+  verified against the two-person Tier-3 flow. Replace the pilot demo operators with named
+  staff at production, keeping the same seats.
 
 > **Four production defects were found and fixed while building this** — all pre-existing,
 > none previously caught by a test:
