@@ -29,6 +29,7 @@ import {
 } from "./data";
 import { useApi } from "./useApi";
 import { useSessionGuard } from "./session";
+import { ActivityPage, ServerHealth, GlobalSearchBox } from "./AdminExtras";
 import { getUser, logout as apiLogout, apiPost, type User } from "@/api";
 import { LoginScreen, ChangePasswordScreen } from "./Login";
 import {
@@ -46,7 +47,7 @@ type Page =
   | "Overview" | "Servers" | "Tools" | "Logs" | "Clients"
   | "API Keys" | "Rate Limits" | "Policies" | "Alerts" | "Settings"
   | "Approvals" | "Audit" | "Identities" | "Registry" | "Kill Switch"
-  | "Anomaly" | "Sessions" | "Gateway" | "DLP";
+  | "Anomaly" | "Sessions" | "Gateway" | "DLP" | "Activity";
 
 const STATUS_COLOR: Record<string, string> = {
   Online: "#4AA785", Degraded: "#E5A000", Offline: "#D9534F",
@@ -164,6 +165,7 @@ function SideNav({ page, setPage, open, onLogout }: { page: Page; setPage: (p: P
         {/* Security — collapsible parent group */}
         <NavGroup label="Security" icon={<Lock size={16} strokeWidth={1.6} />} page={page} setPage={setPage} items={[
           { page: "Anomaly", icon: <Siren size={15} strokeWidth={BW} /> },
+          { page: "Activity", icon: <Activity size={15} strokeWidth={BW} /> },
           { page: "Kill Switch", icon: <ShieldBan size={15} strokeWidth={BW} /> },
           { page: "DLP", icon: <EyeOff size={15} strokeWidth={BW} /> },
           { page: "Audit", icon: <ScrollText size={15} strokeWidth={BW} /> },
@@ -270,12 +272,11 @@ function Header({
         </div>
       </div>
       <div className="flex items-center gap-4">
-        <div className="flex items-center gap-2 bg-black/[0.04] rounded-2xl px-3 py-1 w-40">
-          <Search size={14} className="text-black/30 shrink-0" />
-          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search"
-            className="text-sm text-black bg-transparent outline-none border-none w-full placeholder:text-black/20" />
-          <span className="text-xs text-black/20 border border-black/10 rounded px-1">/</span>
-        </div>
+        {/* Global search: looks across identities, sessions, tools, audit, keys — not just
+            the current table — and jumps to the right page. The query still filters the
+            current page too, so per-page filtering is unchanged. */}
+        <GlobalSearchBox query={query} setQuery={setQuery}
+          onNavigate={(p, target) => { setPage(p as Page); if (target) setQuery(target); }} />
         <div className="flex items-center gap-1">
           <button title={dark ? "Light mode" : "Dark mode"} onClick={() => setDark(!dark)} className="p-1 rounded-lg hover:bg-black/[0.04]">
             {dark ? <Moon size={16} className="text-black" /> : <Sun size={16} className="text-black" />}
@@ -556,6 +557,8 @@ function ServersPage({ d, query, onManage, onChanged }: { d: Dashboard; query: s
           </table>
         )}
       </CardBox>
+      {/* Is the BACKEND reachable, not just "process running"? (A2am-blind-spot fix) */}
+      <ServerHealth />
       <div className="flex gap-3 min-w-0">
         <CallsByServer data={d.serverCalls} />
         <TrafficByTransport data={d.transport} />
@@ -1742,7 +1745,7 @@ function LoggedOutScreen({ onSignIn, reason }: { onSignIn: () => void; reason?: 
 
 const INITIAL_PAGE = ((): Page => {
   const p = new URLSearchParams(location.search).get("p");
-  const all: Page[] = ["Overview", "Servers", "Tools", "Logs", "Clients", "API Keys", "Rate Limits", "Policies", "Alerts", "Settings", "Approvals", "Audit", "Identities", "Registry", "Kill Switch", "Anomaly", "Sessions", "Gateway", "DLP"];
+  const all: Page[] = ["Overview", "Servers", "Tools", "Logs", "Clients", "API Keys", "Rate Limits", "Policies", "Alerts", "Settings", "Approvals", "Audit", "Identities", "Registry", "Kill Switch", "Anomaly", "Sessions", "Gateway", "DLP", "Activity"];
   return (all.includes(p as Page) ? p : "Overview") as Page;
 })();
 
@@ -1798,6 +1801,7 @@ function Dashboard_({ user, onLoggedOut }: { user: User; onLoggedOut: (reason?: 
           {page === "Kill Switch" && <KillSwitchPage onAuthExpired={onAuthExpired} />}
           {page === "Audit" && <AuditPage query={query} onAuthExpired={onAuthExpired} />}
           {page === "Sessions" && <InvestigatePage query={query} onAuthExpired={onAuthExpired} />}
+          {page === "Activity" && <ActivityPage query={query} onAuthExpired={onAuthExpired} />}
         </div>
       </div>
       <RightSidebar open={rightOpen} setOpen={setRightOpen} setPage={setPage} d={data}

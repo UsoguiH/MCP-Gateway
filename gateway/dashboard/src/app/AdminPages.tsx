@@ -2,12 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import {
   ShieldAlert, ShieldCheck, CircleAlert, TriangleAlert, Info, Ban, LockOpen,
   UserX, RotateCw, Check, X, ChevronRight, MoreHorizontal, UserPlus, KeyRound,
-  LogOut, Shield, Fingerprint,
+  LogOut, Shield, Fingerprint, Eye,
 } from "lucide-react";
 import { useApi } from "./useApi";
 import { apiGet, apiPost } from "@/api";
 import { toast } from "./toast";
 import { ConfirmModal, Field, GhostBtn, Modal, PrimaryBtn, SecretModal, SelectInput, TextInput } from "./ui";
+import { SeeAsModal } from "./AdminExtras";
 import { getUser } from "@/api";
 
 // ── shared SnowUI primitives (match the reference tokens) ─────────────────────
@@ -358,6 +359,7 @@ export function IdentitiesPage({ query, onAuthExpired }: { query: string; onAuth
   const [signout, setSignout] = useState<any | null>(null);
   const [mfaEnroll, setMfaEnroll] = useState<any | null>(null);
   const [pwReset, setPwReset] = useState<any | null>(null);
+  const [seeAs, setSeeAs] = useState<string | null>(null);
   const [secret, setSecret] = useState<{ title: string; note: string; rows: { label: string; value: string }[] } | null>(null);
 
   const reloadAll = () => { ops.reload(); mfa.reload(); };
@@ -438,6 +440,7 @@ export function IdentitiesPage({ query, onAuthExpired }: { query: string; onAuth
                       ? <button onClick={() => act("/api/admin/unrevoke", o.sub, `${o.sub} restored`)} className="text-xs px-2.5 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04]">Restore</button>
                       : <button onClick={() => act("/api/admin/revoke", o.sub, `${o.sub} revoked`)} className="text-xs px-2.5 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04] flex items-center gap-1" style={{ color: "#D9534F" }}><UserX size={12} /> Revoke</button>}
                     <RowMenu items={[
+                      { label: "See what their AI sees", icon: <Eye size={13} />, onClick: () => setSeeAs(o.sub) },
                       { label: "Change role / clearance", icon: <Shield size={13} />, onClick: () => setRoleEdit(o) },
                       { label: "Enroll / reset MFA", icon: <Fingerprint size={13} />, onClick: () => setMfaEnroll(o) },
                       { label: "Reset password", icon: <KeyRound size={13} />, onClick: () => setPwReset(o) },
@@ -486,6 +489,7 @@ export function IdentitiesPage({ query, onAuthExpired }: { query: string; onAuth
           onClose={() => setRoleEdit(null)}
           onSaved={() => { setRoleEdit(null); reloadAll(); }} />
       )}
+      {seeAs && <SeeAsModal sub={seeAs} onClose={() => setSeeAs(null)} />}
       {offboard && (
         <ConfirmModal title={`Offboard ${offboard.sub}?`}
           body={<>Removes <b>{offboard.sub}</b> from the directory, terminates every session and token, and purges their password and authenticator. Their audit history is kept. This cannot be undone from the UI.</>}

@@ -1721,6 +1721,172 @@ def investigate(subject: str = "", limit: int = 400,
     return {"subjects": subjects, "count": len(subjects)}
 
 
+# ---------- admin: live per-user activity stream ("show me everything sara's AI is doing") ----------
+@app.get("/api/admin/activity")
+def activity(subject: str = "", since: float = 0.0, limit: int = 100,
+             claims: dict = Depends(require_admin)):
+    """A live feed of what one identity's AI is doing, right now. The console polls with the
+    `since` cursor so it only pulls NEW events — during an incident you watch a person's tool
+    calls scroll in, instead of hand-cross-referencing the audit page. Without `subject`,
+    returns the live feed across everyone."""
+    records = audit.tail(2000)
+    live = {s["sub"] for s in mcp_server.sessions_list()}
+
+    def _match(r):
+        who = r.get("user") or r.get("sub") or r.get("by")
+        if subject and who != subject:
+            return False
+        return (r.get("ts") or 0) > since
+
+    rows = []
+    for r in records:
+        if not _match(r):
+            continue
+        rows.append({
+            "ts": r.get("ts"), "event": r.get("event"),
+            "who": r.get("user") or r.get("sub") or r.get("by"),
+            "server": r.get("server"), "tool": r.get("tool"), "tier": r.get("tier"),
+            "outcome": r.get("outcome") or r.get("status"),
+            "reason": r.get("reason"),
+            "classification": r.get("classification"), "pii_masked": r.get("pii_masked"),
+            "duration_ms": r.get("duration_ms"), "approval_id": r.get("approval_id"),
+        })
+    rows = rows[-limit:]
+    return {
+        "subject": subject or None,
+        "live": (subject in live) if subject else None,
+        "events": rows,
+        "cursor": rows[-1]["ts"] if rows else since,     # feed this back as `since`
+        "active_now": sorted(live),
+    }
+
+
+# ---------- admin: is the BACKEND up, not just the process ("is postgres reachable?") ----------
+@app.get("/api/admin/health/servers")
+async def server_health(claims: dict = Depends(require_admin)):
+    """Probe each connector's actual backend — the DB behind postgres, Gitea behind gitea,
+    Qdrant behind qdrant — not just whether the server process is alive. This is the
+    difference between 'docs shows Online' and 'docs can actually reach its data'."""
+    probes = await gw.mcp.health_all()
+    summary = {"up": 0, "down": 0, "unknown": 0}
+    for p in probes:
+        summary[p.get("backend", "unknown")] = summary.get(p.get("backend", "unknown"), 0) + 1
+    return {"servers": probes, "summary": summary}
+
+
+# ---------- admin: see-as / role preview ("what does khalid's AI actually see?") ----------
+@app.get("/api/admin/preview")
+def preview_visibility(role: str = "", sub: str = "",
+                       claims: dict = Depends(require_admin)):
+    """Show the exact tool list a role — or a specific operator — would see, WITHOUT being
+    them. Answers 'why can't khalid reach the database?' in one click instead of
+    reverse-engineering policy.yaml. Read-only: it runs the same visibility logic the
+    gateway uses, against synthesized claims."""
+    roles = POLICY["roles"]
+    if sub:
+        u = USERS.get(sub)
+        if not u:
+            raise HTTPException(404, f"unknown operator '{sub}'")
+        role = u["role"]
+        clearance = u["clearance"]
+        as_who = f"{sub} ({role})"
+    else:
+        if role not in roles:
+            raise HTTPException(400, f"unknown role '{role}'. Roles: {sorted(roles)}")
+        clearance = {"admin": "top_secret", "approver": "secret",
+                     "analyst": "secret"}.get(role, "restricted")
+        as_who = f"role: {role}"
+
+    rc = roles[role]
+    synth = {"sub": sub or f"preview:{role}", "role": role, "clearance": clearance}
+    visible = gw.visible_tools(synth)
+    by_server: dict[str, list] = {}
+    for t in visible:
+        by_server.setdefault(t["server"], []).append({"tool": t["name"], "tier": t["tier"]})
+
+    # what they CANNOT see, and why — the actually-useful part
+    entitled = _role_servers_for(role)
+    all_servers = sorted(gw.mcp.servers)
+    blocked_servers = ([] if entitled is None
+                       else [s for s in all_servers if s not in entitled])
+    ceiling = rc.get("max_tool_tier", -1)
+    return {
+        "as": as_who, "role": role, "clearance": clearance,
+        "max_tool_tier": ceiling,
+        "visible_tool_count": len(visible),
+        "by_server": {s: sorted(v, key=lambda x: (x["tier"], x["tool"]))
+                      for s, v in sorted(by_server.items())},
+        "blocked_servers": blocked_servers,
+        "note": (f"This role can request up to tier {ceiling}. Tools above that tier, and "
+                 f"tools on servers not entitled to the role, are invisible."),
+    }
+
+
+def _role_servers_for(role: str):
+    from .gateway import _role_servers
+    return _role_servers({"role": role})
+
+
+# ---------- admin: global search ("search for that thing") ----------
+@app.get("/api/admin/search")
+def global_search(q: str = "", claims: dict = Depends(require_admin)):
+    """Search across the WHOLE system — identities, sessions, tools, audit events, API keys,
+    OAuth clients, servers — from one box. The header search only filtered the current
+    table; this actually looks everywhere and links you to the right page."""
+    ql = (q or "").strip().lower()
+    if len(ql) < 2:
+        return {"query": q, "results": [], "note": "type at least 2 characters"}
+    results: list[dict] = []
+
+    def add(kind, label, sub, page, **extra):
+        results.append({"kind": kind, "label": label, "detail": sub, "page": page, **extra})
+
+    # operators / identities
+    for s, u in USERS.items():
+        if ql in s.lower() or ql in (u.get("name", "").lower()):
+            add("identity", s, f"{u['name']} · {u['role']} · {u['clearance']}",
+                "Identities", target=s)
+    # live sessions
+    for sess in mcp_server.sessions_list():
+        if ql in (sess.get("sub", "").lower()) or ql in (sess.get("id", "").lower()):
+            add("session", f"{sess.get('sub')} · {sess.get('id')}",
+                f"live MCP session", "Sessions", target=sess.get("sub"))
+    # tools + servers (registry)
+    for e in gw.registry.entries.values():
+        key = f"{e['server']}.{e['tool']}"
+        if ql in key.lower() or ql in e["server"].lower():
+            add("tool", key, f"tier {e['tier']} · {e['status']}", "Registry")
+    # API keys
+    for k in apikeys.list_keys():
+        if ql in (k.get("name", "").lower()) or ql in (k.get("sub", "").lower()) or ql in k.get("kid", "").lower():
+            add("api_key", k.get("name") or k["kid"], f"key for {k.get('sub')} · {k.get('scope')}",
+                "API Keys")
+    # OAuth clients
+    for c in oauth.list_clients():
+        if ql in (c.get("client_name", "").lower()) or ql in c["client_id"].lower():
+            add("oauth_client", c.get("client_name") or c["client_id"],
+                f"{c['active_refresh_tokens']} token(s)", "API Keys")
+    # audit events (recent) — match on user/tool/server/event/reason
+    seen_audit = 0
+    for r in reversed(audit.tail(1500)):
+        hay = " ".join(str(r.get(f, "")) for f in
+                       ("event", "user", "sub", "by", "server", "tool", "reason", "scope")).lower()
+        if ql in hay:
+            add("audit", r.get("event", "event"),
+                f"{r.get('user') or r.get('by') or ''} · {r.get('tool') or r.get('server') or ''}"
+                f" · {_fmt_ts(r.get('ts'))}", "Audit")
+            seen_audit += 1
+            if seen_audit >= 25:
+                break
+    order = {"identity": 0, "session": 1, "tool": 2, "api_key": 3, "oauth_client": 4, "audit": 5}
+    results.sort(key=lambda x: order.get(x["kind"], 9))
+    return {"query": q, "results": results[:60], "count": len(results)}
+
+
+def _fmt_ts(ts):
+    return time.strftime("%m-%d %H:%M", time.localtime(ts)) if ts else ""
+
+
 @app.get("/api/metrics")
 def metrics(claims: dict = Depends(require_admin)):
     """Operational counters for SIEM/dashboards (event tallies, breaker, leases)."""

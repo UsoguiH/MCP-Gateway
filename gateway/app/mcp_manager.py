@@ -299,6 +299,68 @@ class ManagedServer:
         stack, self._stack, self.session = self._stack, None, None
         _close_detached(stack)
 
+    async def health_probe(self, timeout: float = 6.0) -> dict:
+        """Is the BACKEND behind this server actually reachable — not just "is the process
+        running"? "docs shows Online" while its Postgres is down is exactly the blind spot
+        an admin hits at 2am. So we call one cheap, no-argument read tool (BACKEND_PROBES)
+        straight on the session and read the result: our servers return {"error": ...} when
+        their backend is unreachable, so we can tell "process up, backend down" apart.
+
+        This deliberately does NOT go through _op(): a health check must never trigger the
+        auto-restart, and a hung backend must not hang the whole health page — hence the
+        hard timeout. A server with no defined probe reports 'process only'.
+        """
+        base = {"server": self.name, "state": self.state,
+                "version": self.server_version, "transport": self.transport,
+                "tools": len(self.tools)}
+        if self.state != "running" or self.session is None:
+            return {**base, "backend": "down", "detail": "server process not running"}
+        probe = BACKEND_PROBES.get(self.name)
+        if not probe:
+            return {**base, "backend": "unknown",
+                    "detail": "process responding; backend not probed for this server"}
+        tool, args = probe
+        t0 = time.perf_counter()
+        try:
+            result = await asyncio.wait_for(self.session.call_tool(tool, args), timeout)
+        except (asyncio.TimeoutError, TimeoutError):
+            return {**base, "backend": "down", "latency_ms": round(timeout * 1000),
+                    "detail": f"backend did not answer within {timeout:.0f}s (probe: {tool})"}
+        except Exception as e:
+            return {**base, "backend": "down",
+                    "detail": f"probe {tool} failed: {type(e).__name__}: {str(e)[:120]}"}
+        latency = round((time.perf_counter() - t0) * 1000, 1)
+        text = "".join(getattr(c, "text", "") or "" for c in (result.content or []))
+        # Our connectors return a JSON body with an "error" key when their backend is
+        # unreachable (lazy-connect design), so the process answers but the backend is down.
+        try:
+            parsed = json.loads(text)
+            if isinstance(parsed, dict) and parsed.get("error"):
+                return {**base, "backend": "down", "latency_ms": latency,
+                        "detail": str(parsed["error"])[:160], "probe": tool}
+        except (json.JSONDecodeError, TypeError):
+            pass
+        return {**base, "backend": "up", "latency_ms": latency, "probe": tool}
+
+
+# One cheap, no-argument, read-only tool per server whose success proves the BACKEND is
+# reachable (a DB SELECT, a Gitea /version, a Qdrant collections list). Curated by name so a
+# health check can never accidentally call something with side effects, and keyed on OUR
+# server names, never the server's own claims. Servers absent here are probed as "process
+# only" (config-only connectors like files/markitdown/browser have no network backend to
+# reach; docs/actions are in-memory pilot fixtures).
+BACKEND_PROBES: dict[str, tuple[str, dict]] = {
+    "postgres":   ("server_info", {}),           # SELECT version() — touches the DB
+    "reports":    ("list_reports", {}),          # process only (its DB use is per-report)
+    "gitea":      ("get_server_version", {}),     # GET /api/v1/version — touches Gitea
+    "qdrant":     ("list_collections", {}),       # touches Qdrant
+    "opendata":   ("list_categories", {}),        # touches the public portal (may be slower)
+    "files":      ("list_shares", {}),            # confirms the roots are configured/mounted
+    "markitdown": ("list_supported_formats", {}),
+    "browser":    ("list_allowed_domains", {}),
+    "actions":    ("list_records", {}),
+}
+
 
 def _make_server(spec: dict) -> "ManagedServer":
     return ManagedServer(spec["name"], spec.get("command"), spec.get("args", []),
@@ -319,6 +381,23 @@ class MCPManager:
     async def stop_all(self):
         for srv in self.servers.values():
             await srv.stop()
+
+    async def health_all(self, timeout: float = 6.0) -> list[dict]:
+        """Probe every server's backend concurrently. One slow/dead backend cannot hold up
+        the others or the health page — each probe is independently bounded."""
+        names = list(self.servers)
+        results = await asyncio.gather(
+            *[self.servers[n].health_probe(timeout) for n in names],
+            return_exceptions=True)
+        out = []
+        for n, r in zip(names, results):
+            if isinstance(r, dict):
+                out.append(r)
+            else:
+                out.append({"server": n, "backend": "down",
+                            "detail": f"probe crashed: {type(r).__name__}"})
+        out.sort(key=lambda d: (d.get("backend") != "down", d.get("server", "")))
+        return out
 
     # ---- admin lifecycle -------------------------------------------------
     def _get(self, name: str) -> ManagedServer:
