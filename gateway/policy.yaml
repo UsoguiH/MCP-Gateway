@@ -15,21 +15,32 @@ roles:
   # exist for that role: it is absent from tools/list, and calling it returns
   # the same error as a tool that was never registered (no information leak).
   # Omitting the key entirely means "*" (legacy roles defined in tests).
+  # Entitlements for the three connectors added 2026-07-12:
+  #   markitdown — reads the SAME allow-listed shares as files-mcp and returns Markdown.
+  #                It grants no reach that `files` does not already grant, so wherever
+  #                `files` is entitled, `markitdown` is too.
+  #   qdrant     — semantic memory. Everyone who can read documents can search and add to
+  #                it; collection-level classification and :ro markers do the fine-grained
+  #                gating, not the role.
+  #   browser    — NOT granted to `employee`. A browser reaches the outside world: it is an
+  #                exfiltration path and (misconfigured) an SSRF tool. It goes to analysts,
+  #                who have a research need, and to admins. Widen this deliberately, per
+  #                department, after the pilot — not by default.
   employee:
     max_tool_tier: 2        # can *request* up to tier 2 (tier 2 still needs human approval)
     can_approve: false
     admin: false
-    servers: [files, reports, docs, actions]   # docs/actions are pilot test fixtures
+    servers: [files, markitdown, qdrant, reports, docs, actions]   # docs/actions are pilot fixtures
   analyst:
     max_tool_tier: 2
     can_approve: false
     admin: false
-    servers: [files, reports, docs, actions, postgres]
+    servers: [files, markitdown, qdrant, browser, opendata, reports, docs, actions, postgres]
   approver:
     max_tool_tier: 2
     can_approve: true
     admin: false
-    servers: [files, reports, docs, actions]
+    servers: [files, markitdown, qdrant, reports, docs, actions]
   admin:
     max_tool_tier: 3
     can_approve: true

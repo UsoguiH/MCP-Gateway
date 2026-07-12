@@ -54,9 +54,22 @@ services:
           "description":"IT & HR policies"},
          {"name":"hr","path":"/shares/hr","classification":"secret",
           "description":"HR operations"}]
-      # gitea-mcp (Phase 1): the real self-hosted Gitea on the host.
+      # gitea-mcp (Phase 1): the real self-hosted Gitea on the host, via a dedicated
+      # non-admin machine account (the token is a scoped, non-admin token).
       GITEA_URL: "http://host.docker.internal:3000"
       GITEA_TOKEN_FILE: /run/secrets/gitea_token
+      # markitdown-mcp: shares files-mcp's DOCS_ROOTS above (one allow-list). No extra config.
+      # browser-mcp: Chromium via Playwright. REQUIRED allow-list; there is no
+      # allow-everything value. SSRF guard + interaction/JS-eval opt-ins stay OFF by default.
+      # Set to the specific external hosts staff actually need (comma-separated; ".gov.sa"
+      # allows subdomains). Empty ⇒ the browser is inert.
+      BROWSER_ALLOWED_DOMAINS: "${BROWSER_ALLOWED_DOMAINS:-}"
+      # qdrant-mcp: point at your Qdrant, and allow-list the collections with per-collection
+      # NDMO classification (and optional :ro), e.g. "notes:restricted, kb:public:ro".
+      # For an authenticated Qdrant, add a `qdrant_api_key` secret and set
+      # QDRANT_API_KEY_FILE=/run/secrets/qdrant_api_key.
+      QDRANT_URL: "${QDRANT_URL:-}"
+      QDRANT_COLLECTIONS: "${QDRANT_COLLECTIONS:-}"
     secrets:
       - kek
       - audit_key

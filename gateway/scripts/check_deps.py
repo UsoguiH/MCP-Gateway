@@ -13,6 +13,13 @@ ALLOWLIST = {
     "fastapi", "uvicorn", "pyjwt", "cryptography", "pyyaml", "httpx", "mcp", "pytest",
     "jsonschema",   # W9.6 arg-schema enforcement — pinned explicitly, never transitive-only
     "psycopg",      # postgres-mcp server driver
+    # Optional connectors — reviewed 2026-07-12. Each is loaded lazily and the connector
+    # returns a clean "not installed" error when its dependency is absent, so these can be
+    # omitted from a minimal deployment that does not need that connector.
+    "playwright",   # browser-mcp (Chromium)
+    "markitdown",   # markitdown-mcp (document → Markdown)
+    "qdrant-client",  # qdrant-mcp (vector search)
+    "fastembed",    # qdrant-mcp text tools (local offline embedding)
 }
 
 REQ = Path(__file__).resolve().parent.parent / "requirements.txt"

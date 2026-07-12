@@ -28,6 +28,9 @@ SERVER_MODULES = [
     ("reports_server", 2),
     ("docs_server", 2),
     ("actions_server", 4),
+    ("browser_server", 8),
+    ("markitdown_server", 4),
+    ("qdrant_server", 10),
 ]
 
 
@@ -51,6 +54,33 @@ def test_server_module_imports_and_registers_tools(module_name, min_tools):
     tools = anyio.run(mod.mcp.list_tools)
     assert len(tools) >= min_tools, (
         f"{module_name} registered {len(tools)} tools, expected >= {min_tools}")
+
+
+@pytest.mark.parametrize("module_name,_min", SERVER_MODULES)
+def test_importing_a_server_writes_nothing_to_stdout(module_name, _min):
+    """An MCP stdio server speaks JSON-RPC over STDOUT. Anything else written there —
+    a library banner, a progress bar, a parser warning — lands inside the protocol stream
+    and desynchronises the transport. The connection then dies with an opaque
+    `OSError: [Errno 22] Invalid argument` on the next flush, which looks like anything
+    except the actual cause.
+
+    This bit us for real: markitdown's document parsers print, and fastembed prints a
+    model-download progress bar. Both corrupted the channel. Guard every server, forever.
+    """
+    import io
+    import contextlib
+    import subprocess
+
+    # A fresh interpreter: import the module and report anything it printed. In-process
+    # would not catch it, because pytest has already replaced sys.stdout.
+    code = (f"import sys; sys.path.insert(0, {str(SERVERS_DIR)!r});"
+            f"import {module_name}")
+    r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                       timeout=120)
+    assert r.returncode == 0, f"{module_name} failed to import: {r.stderr[-400:]}"
+    assert r.stdout == "", (
+        f"{module_name} wrote to stdout on import — that corrupts the MCP protocol "
+        f"stream. Captured: {r.stdout[:300]!r}")
 
 
 def test_no_server_uses_future_annotations():

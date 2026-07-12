@@ -278,7 +278,9 @@ class Gateway:
             vault.revoke(cred["lease"])          # per-call lease, revoked immediately after use
 
         g = self._govern(claims, session, f"{server}.{tool}",
-                         classification.tool_classification(self.registry.get(server, tool)), raw)
+                         classification.tool_classification(self.registry.get(server, tool)), raw,
+                         arguments=arguments)      # so the tool's echo of our own args is not
+                                                   # recorded as newly-untrusted content
         audit.record(
             "tool_call", user=claims["sub"], server=server, tool=tool, tier=tier,
             approved_id=approved_id, truncated=g["truncated"], classification=g["classification"],
@@ -294,7 +296,7 @@ class Gateway:
             "approved_id": approved_id, "duration_ms": duration_ms,
         }
 
-    def _govern(self, claims, session, source, data_class, raw):
+    def _govern(self, claims, session, source, data_class, raw, arguments: dict | None = None):
         """Run untrusted content (a tool result OR a resource read) through the shared
         governance: size cap -> Unicode sanitize -> taint-record -> DLP-mask by clearance."""
         if len(raw.encode("utf-8")) > MAX_RESULT:
@@ -306,8 +308,43 @@ class Gateway:
         except json.JSONDecodeError:
             parsed, is_json = raw, False
         parsed, res_uflags = unicode_guard.sanitize_obj(parsed)
-        self.taint.add_untrusted(session, json.dumps(parsed, ensure_ascii=False) if is_json else parsed,
-                                 source=source)
+
+        # Record the result as untrusted content — but FIRST strip the caller's own
+        # arguments back out of it.
+        #
+        # Nearly every tool echoes its inputs ("url", "path", "query", "collection"). Taint
+        # is a substring match, so without this the caller's own input becomes "untrusted
+        # content" the moment a tool repeats it, and the NEXT call using that same value is
+        # escalated to human approval. Browsing the same page twice, or re-reading a file
+        # the user named, would demand an approver — and an approval queue full of
+        # self-inflicted false positives is how approvers learn to click yes without reading.
+        #
+        # This does not weaken the defence: an argument that was ALREADY tainted is caught
+        # by check_args before dispatch, and anything genuinely new in the result (page text,
+        # discovered links, row values) still taints. Only the echo of what we ourselves
+        # sent is excluded.
+        taint_text = json.dumps(parsed, ensure_ascii=False) if is_json else parsed
+        for value in (arguments or {}).values():
+            if isinstance(value, str) and len(value) >= self.taint.min_len:
+                taint_text = taint_text.replace(value, " ")
+        self.taint.add_untrusted(session, taint_text, source=source)
+
+        # Per-result classification. `data_class` arriving here is the tool's registry label,
+        # which today is always the fail-safe default ("secret") because the registry stores
+        # no per-tool classification. A connector that spans classified roots — files-mcp and
+        # markitdown read public, restricted AND secret shares — knows the ACTUAL NDMO label
+        # of THIS result (from the admin's allow-list config) and returns it in the payload.
+        # Honour that declared label: it is both more accurate and the whole point of the
+        # per-root classification design. Without this, a public spreadsheet is DLP-gated as
+        # if it were secret, and only secret-cleared staff can read public data.
+        #
+        # A connector declaring its own result's label is trusted exactly as far as the
+        # connector is trusted overall (a compromised connector already holds the data). The
+        # gateway still validates the label and still runs DLP on the way out regardless.
+        if isinstance(parsed, dict):
+            declared = parsed.get("classification")
+            if isinstance(declared, str) and classification.is_valid(declared):
+                data_class = declared
         caller_cleared = classification.dominates(claims.get("clearance", "public"), data_class)
         det = dlp.scan(json.dumps(parsed, ensure_ascii=False) if is_json else parsed)
         masked, detections = parsed, []

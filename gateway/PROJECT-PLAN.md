@@ -330,13 +330,23 @@ test, key custody, org PKI, DR, compliance matrix, formal risk acceptance._
   lifecycle, server lifecycle, notification center; **live-QA-verified** via `ciadmin`
   browser walkthrough (11 tests).
 
-### Phase 2 — Truth, hygiene & console completion (L) — **tasks 1–9 ✅ 2026-07-12**
+### Phase 2 — Truth, hygiene & console completion (L) — **✅ COMPLETE 2026-07-12**
 _Goal: everything the system shows and every claim the docs make is true; the admin console
 does **everything an admin needs** — no backend-only controls, no inert toggles, no blind
 spots from the §7b register; the repo is clean enough to hand to an auditor; the last cheap
 security wins land._
 
-**Progress (2026-07-12):** tasks 1–9 done. Suite: **235 tests green** (was 148).
+**Progress (2026-07-12): all 10 tasks done — Phase 2 complete.** Suite: **305 tests green**
+(was 148). **Employee-zero passed end-to-end on real infrastructure**: a colleague's local AI
+self-onboarded via OAuth 2.1, the taint engine escalated a tool-supplied filename to human
+approval, an approver released it, and the document's Saudi PII came back masked
+(`[NATID:****6781]`) before it entered the model's context. And **three new production
+connectors shipped** — Playwright/Chromium browsing (host allow-list + DNS-resolution SSRF
+guard), MarkItDown document conversion (per-document classification), and Qdrant semantic
+memory (collection allow-list, local embedding) — 22 tools, all driven live through the full
+pipeline.
+
+Original Phase-2 progress: tasks 1–9 done.
 **Only task 10 remains — the employee-zero smoke test — and it needs a real client machine,
 so it is yours to run.** Delivered: repo hygiene · test-artifact purge script · the dashboard
 truth pass (every number measured) · the full console build-out · session policy (idle renewal

@@ -165,3 +165,50 @@ servers:
     env:
       ODP_LANG: "en"
 
+  # ---------------------------------------------------------------------------
+  # markitdown — turn PDF/Word/Excel/PowerPoint into Markdown a model can read.
+  # Deliberately shares files-mcp's DOCS_ROOTS: ONE allow-list decides which
+  # documents exist, so a converter can never become a way around it.
+  - name: markitdown
+    command: python
+    args: ["servers/markitdown_server.py"]
+    env:
+      DOCS_ROOTS: "${DOCS_ROOTS}"               # the SAME roots as files-mcp
+      MARKITDOWN_MAX_FILE_BYTES: "20000000"
+      MARKITDOWN_MAX_OUTPUT_BYTES: "1000000"
+      MARKITDOWN_ALLOW_URLS: "0"                # server-side URL fetch = SSRF. Use browser.
+
+  # ---------------------------------------------------------------------------
+  # browser — Chromium via Playwright. The most dangerous tool in this catalogue:
+  # unconstrained, a browser is an SSRF + exfiltration primitive. Every default here
+  # is hostile on purpose.
+  #   * BROWSER_ALLOWED_DOMAINS has NO allow-everything value. Empty ⇒ nothing works.
+  #   * Hosts that RESOLVE to private/link-local addresses are refused even when the
+  #     domain is allow-listed (stops evil.com → 169.254.169.254 metadata theft).
+  #   * JS evaluation and form submission are separate opt-in flags, off by default.
+  - name: browser
+    command: python
+    args: ["servers/browser_server.py"]
+    env:
+      BROWSER_ALLOWED_DOMAINS: "${BROWSER_ALLOWED_DOMAINS}"   # REQUIRED. e.g. ".gov.sa,example.com"
+      BROWSER_ALLOW_PRIVATE_IPS: "0"            # 1 = SSRF against your own network. Review first.
+      BROWSER_ALLOW_EVAL: "0"                   # 1 = arbitrary JS in the page's origin (RCE-ish)
+      BROWSER_ALLOW_INTERACTION: "0"            # 1 = fill+submit forms as the user
+      BROWSER_MAX_TEXT_BYTES: "200000"
+      BROWSER_TIMEOUT_MS: "20000"
+
+  # ---------------------------------------------------------------------------
+  # qdrant — semantic memory. A vector store is where knowledge accumulates OUTSIDE
+  # your document controls, so collections are allow-listed, carry an NDMO
+  # classification (retrieved passages stay governed), and may be marked read-only.
+  # Embeddings are computed locally with fastembed — nothing leaves the host.
+  - name: qdrant
+    command: python
+    args: ["servers/qdrant_server.py"]
+    env:
+      QDRANT_URL: "${QDRANT_URL}"               # e.g. http://qdrant:6333
+      QDRANT_API_KEY_FILE: "${QDRANT_API_KEY_FILE}"
+      QDRANT_COLLECTIONS: "${QDRANT_COLLECTIONS}"   # REQUIRED. "notes:restricted, kb:public:ro"
+      QDRANT_MAX_RESULTS: "50"
+      QDRANT_ALLOW_DELETE_COLLECTION: "0"       # dropping a collection is irreversible
+

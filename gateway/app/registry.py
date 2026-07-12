@@ -29,14 +29,60 @@ _REQUIRE_APPROVAL = (CONFIG.get("registry", {}) or {}).get("require_approval", F
 _READ_HINTS = ("search", "read", "list", "get", "lookup", "find", "view", "query",
                "describe", "show", "explain", "count", "select", "stat", "info",
                "check", "compare", "is_", "status", "size", "usage", "ratio",
-               "distinct", "blocking", "inspect")
+               "distinct", "blocking", "inspect",
+               # Retrieval/rendering verbs. Without these, harmless read-only tools
+               # (extract_tables, screenshot_page, convert_document) fell to the
+               # ambiguous default of tier 2 and demanded human approval for EVERY
+               # read — which is how approvers are trained to rubber-stamp, and
+               # rubber-stamping is what makes the tier-2 gate worthless when it
+               # finally matters.
+               "extract", "screenshot", "convert", "render", "preview", "summar")
 _TIER1_HINTS = ("update", "set", "modify", "edit", "assign", "create", "add",
                 "insert", "upsert", "rename", "refresh", "import", "analyze",
                 "vacuum", "star", "watch", "fork")
 _TIER2_HINTS = ("send", "email", "notify", "message", "post", "publish", "export",
-                "merge", "grant", "revoke", "transfer")
+                "merge", "grant", "revoke", "transfer", "submit", "upload")
 _TIER3_HINTS = ("delete", "remove", "drop", "purge", "destroy", "wipe", "truncate",
-                "terminate")
+                "terminate",
+                # Arbitrary code execution is the most dangerous thing a tool can offer.
+                # It is not a "write" — it is every write, plus every read, in one call.
+                "evaluate", "eval", "execute", "exec_", "run_code", "shell", "command")
+
+
+# Curated tiers for the connectors WE author. Gateway-owned, exactly like the heuristic:
+# the key is "<server>:<tool>" and the server name comes from OUR config, never from the
+# server's own claims — so a hostile MCP server cannot name a tool `read_page` and inherit
+# a safe tier by pretending to be `browser`. The heuristic guesses; this is where we say
+# what we actually know, and it is reviewed in code.
+_CURATED_TIERS: dict[str, int] = {
+    # browser — reading the web is safe; acting on it, or running code in it, is not.
+    "browser:list_allowed_domains": 0,
+    "browser:read_page": 0,
+    "browser:get_page_links": 0,
+    "browser:extract_tables": 0,
+    "browser:screenshot_page": 0,
+    "browser:search_page_text": 0,
+    "browser:fill_and_submit": 2,      # submits a form on a remote site, in the user's name
+    "browser:evaluate_javascript": 3,  # arbitrary JS in the page's origin: two-person
+
+    # markitdown — pure read-only conversion of documents that files-mcp already exposes.
+    "markitdown:list_supported_formats": 0,
+    "markitdown:convert_document": 0,
+    "markitdown:describe_document": 0,
+    "markitdown:convert_url": 2,       # reaches OUT of the network; approval-gated
+
+    # qdrant — searching memory is a read; writing to it is reversible; deleting is not.
+    "qdrant:list_collections": 0,
+    "qdrant:search": 0,
+    "qdrant:search_vectors": 0,
+    "qdrant:get_point": 0,
+    "qdrant:count_points": 0,
+    "qdrant:create_collection": 1,
+    "qdrant:store": 1,                 # adding a passage is reversible (delete_points)
+    "qdrant:upsert_vectors": 1,
+    "qdrant:delete_points": 3,         # irreversible loss of knowledge
+    "qdrant:delete_collection": 3,     # destroys an entire knowledge base
+}
 
 
 def tool_fingerprint(tool: dict) -> str:
@@ -51,7 +97,12 @@ _READ_PREFIXES = ("is_", "has_", "get_", "list_", "read_", "show_", "describe_",
                   "check_", "count_", "search_", "compare_", "explain_", "view_")
 
 
-def _default_tier(name: str) -> int:
+def _default_tier(name: str, server: str = "") -> int:
+    """Risk tier at first discovery. A curated entry for a connector we author wins; the
+    name heuristic is the fallback for everything else, and it fails toward human review."""
+    curated = _CURATED_TIERS.get(f"{server}:{name}")
+    if curated is not None:
+        return curated
     n = name.lower()
     if n.startswith(_READ_PREFIXES):   # unambiguous read/predicate prefix wins
         return 0                       # (e.g. is_pull_request_merged has "merge" inside)
@@ -105,7 +156,7 @@ class Registry:
                 self.entries[key] = {
                     "server": t["server"],
                     "tool": t["name"],
-                    "tier": _default_tier(t["name"]),
+                    "tier": _default_tier(t["name"], t["server"]),
                     "fingerprint": fp,
                     "status": status,         # prod: pending until Risk-Board approves
                     "quarantine_reason": None,
