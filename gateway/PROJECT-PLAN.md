@@ -330,16 +330,24 @@ test, key custody, org PKI, DR, compliance matrix, formal risk acceptance._
   lifecycle, server lifecycle, notification center; **live-QA-verified** via `ciadmin`
   browser walkthrough (11 tests).
 
-### Phase 2 — Truth, hygiene & console completion (L, ~3–4 weeks) — **tasks 1–4 ✅ 2026-07-12**
+### Phase 2 — Truth, hygiene & console completion (L) — **tasks 1–9 ✅ 2026-07-12**
 _Goal: everything the system shows and every claim the docs make is true; the admin console
 does **everything an admin needs** — no backend-only controls, no inert toggles, no blind
 spots from the §7b register; the repo is clean enough to hand to an auditor; the last cheap
 security wins land._
 
-**Progress (2026-07-12):** tasks 1–4 done — hygiene, the test-artifact purge, the dashboard
-truth pass, and the full console build-out. Suite: **193 tests green** (was 148). Remaining:
-tasks 5–10 (session policy, security quick wins, test debt, docs, governance sweep,
-employee-zero).
+**Progress (2026-07-12):** tasks 1–9 done. Suite: **235 tests green** (was 148).
+**Only task 10 remains — the employee-zero smoke test — and it needs a real client machine,
+so it is yours to run.** Delivered: repo hygiene · test-artifact purge script · the dashboard
+truth pass (every number measured) · the full console build-out · session policy (idle renewal
++ absolute cap + expiry warning) · fail-closed argument validation · a least-privilege Gitea
+machine account · vault/apikeys/reports tests + a CI guard against ui-bundle drift · five new
+runbooks · the governance sweep.
+
+Two items are deliberately left for the organization and are flagged in place, not silently
+dropped: the **backup destination** (§7 H15 — I can point `backup.ps1` anywhere, but the second
+disk/NAS path is yours), and the **Risk Board names** (OPERATIONS.md §5f — "Risk-Board approval"
+must be a named body with separation of duties, and I cannot invent who).
 
 > **Four production defects were found and fixed while building this** — all pre-existing,
 > none previously caught by a test:
