@@ -439,9 +439,21 @@ def _role_servers(claims: dict) -> set[str] | None:
 
 def _validate_args(tool: dict | None, args: dict) -> tuple[bool, str]:
     """Validate args against the tool's declared input schema with
-    additionalProperties=false (W9.6). Missing/empty schema → allow (nothing to
-    enforce). Never crash the pipeline on a malformed schema (fail-open to the
-    other controls, which still gate the call)."""
+    additionalProperties=false (W9.6).
+
+    This control FAILS CLOSED. It used to fail open in two ways, and both were holes:
+
+      * jsonschema not importable → every call was waved through unvalidated. The library
+        is a pinned dependency (see config's startup tripwire), so its absence is a broken
+        deployment, not a reason to drop a security control.
+      * a malformed schema raised, and we allowed the call. But the schema comes from the
+        MCP SERVER — attacker-controlled if that server is compromised or rug-pulled. A
+        deliberately-broken schema was therefore a way to *switch argument validation off*
+        for a tool. An unusable schema now blocks the call and is visible to an admin.
+
+    A tool that genuinely declares no properties has nothing to enforce and is allowed
+    (the other controls — tier, ABAC, taint, rate limits — still gate it).
+    """
     if not tool:
         return True, ""
     schema = tool.get("schema") or {}
@@ -450,14 +462,18 @@ def _validate_args(tool: dict | None, args: dict) -> tuple[bool, str]:
     try:
         import jsonschema
     except ModuleNotFoundError:
-        return True, ""
+        return False, ("argument validation unavailable (jsonschema is not installed) — "
+                       "refusing the call rather than skipping the check")
     try:
         jsonschema.validate(instance=args, schema={**schema, "additionalProperties": False})
         return True, ""
     except jsonschema.ValidationError as e:
         return False, str(e.message)[:150]        # bad args -> block
-    except Exception:
-        return True, ""                            # our own bad schema -> fail open (other controls gate)
+    except jsonschema.SchemaError as e:
+        return False, (f"the tool's declared input schema is invalid, so its arguments "
+                       f"cannot be checked: {str(e.message)[:110]}")
+    except Exception as e:                        # anything else in the validator
+        return False, f"argument validation failed: {type(e).__name__}"
 
 
 def _strip_injected(tool: dict) -> dict:

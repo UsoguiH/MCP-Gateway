@@ -55,10 +55,15 @@ def _defaults() -> dict:
             "window": 500,
         },
         "alerts": {"rules": {r: True for r in ALERT_RULES}},
+        # Console session policy (A12). `ttl_seconds` is effectively the IDLE window: an
+        # active operator's token is silently renewed, so it only ever expires after they
+        # stop working. `absolute_seconds` caps the total session regardless of activity —
+        # past it, re-authentication is required. `warn_seconds` is how long before expiry
+        # the console warns (it used to just log you out mid-approval, with no warning).
         "session": {
-            "ttl_seconds": int(_AUTH.get("access_ttl_seconds", 600)),
-            "idle_seconds": int(_AUTH.get("idle_timeout_seconds", 900)),
-            "warn_seconds": int(_AUTH.get("expiry_warning_seconds", 120)),
+            "ttl_seconds": int(_AUTH.get("session_ttl_seconds", 1800)),          # 30 min idle
+            "absolute_seconds": int(_AUTH.get("session_absolute_seconds", 28800)),  # 8 h cap
+            "warn_seconds": int(_AUTH.get("expiry_warning_seconds", 120)),       # 2 min notice
         },
     }
 
@@ -75,7 +80,7 @@ _BOUNDS = {
     ("anomaly", "approval_sla_seconds"): (60, 86_400),
     ("anomaly", "window"): (50, 100_000),
     ("session", "ttl_seconds"): (60, 86_400),
-    ("session", "idle_seconds"): (60, 86_400),
+    ("session", "absolute_seconds"): (300, 604_800),
     ("session", "warn_seconds"): (15, 3_600),
 }
 

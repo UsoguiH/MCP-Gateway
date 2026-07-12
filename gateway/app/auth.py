@@ -606,17 +606,48 @@ def finish_password_only(username: str) -> tuple[str, str] | None:
     return _mint_session(username, ["pwd"])
 
 
+def session_ttl() -> int:
+    """Console session lifetime, from the runtime settings overlay (admin-editable)."""
+    try:
+        from . import settings
+        return int(settings.get("session", "ttl_seconds"))
+    except Exception:
+        return _ACCESS_TTL
+
+
+def session_absolute_max() -> int:
+    """Hard cap on a session's total age, however active the operator is."""
+    try:
+        from . import settings
+        return int(settings.get("session", "absolute_seconds"))
+    except Exception:
+        return 28800
+
+
+# Belt-and-braces ceiling on any session token's declared lifetime. The signing key is what
+# actually prevents forgery; this bounds the damage if a token is ever minted with an absurd
+# exp. It is deliberately NOT the configured TTL: lowering the TTL should shorten the NEXT
+# session, not eject everyone who is currently signed in.
+_TTL_HARD_CEILING = 86_400
+
+
 def _mint_session(username: str, amr: list[str],
-                  pwd_change_required: bool | None = None) -> tuple[str, str]:
+                  pwd_change_required: bool | None = None,
+                  auth_time: int | None = None) -> tuple[str, str]:
     """Mint a short-lived ES256 session token bound to a per-session secret the
-    client replays (bearer-binding). Shared by password login and the dev bypass."""
+    client replays (bearer-binding). Shared by password login, refresh, and the dev bypass.
+
+    `auth_time` is carried FORWARD across refreshes: it records when the operator actually
+    authenticated, so the absolute session cap cannot be extended indefinitely by refreshing.
+    """
     u = USERS[username]
     now = int(time.time())
     binding = secrets.token_hex(32)                      # session secret; client replays it
     claims = {
         "iss": _ISSUER, "aud": _AUDIENCE, "sub": username,
         "name": u["name"], "role": u["role"], "clearance": u["clearance"],
-        "iat": now, "nbf": now, "exp": now + _ACCESS_TTL, "auth_time": now,
+        "iat": now, "nbf": now, "exp": now + session_ttl(),
+        "auth_time": int(auth_time or now),
         "jti": uuid.uuid4().hex, "amr": amr,
         "acr": "aal2" if "otp" in amr else "aal1",
         "cnf": {"x5t#S256": binding},                    # token usable only with the binding
@@ -624,6 +655,34 @@ def _mint_session(username: str, amr: list[str],
                                if pwd_change_required is None else pwd_change_required,
     }
     return jwt.encode(claims, pki.signing_key(), algorithm=_ALG), binding
+
+
+class SessionExpired(Exception):
+    """The absolute session cap is reached — the operator must authenticate again."""
+
+
+def refresh_session(claims: dict) -> tuple[str, str, int]:
+    """Renew a live session (A12).
+
+    The console used to hold one fixed-lifetime token and simply die when it expired —
+    mid-approval, with no warning. Now an active operator's session is renewed, which makes
+    `ttl_seconds` behave as an IDLE timeout: stop working and the token lapses on its own.
+    The renewal keeps the original `auth_time`, so `absolute_seconds` still forces a real
+    re-authentication no matter how long someone stays active.
+
+    Returns (token, binding, expires_in). Raises SessionExpired past the absolute cap.
+    """
+    sub = claims["sub"]
+    authenticated_at = int(claims.get("auth_time") or claims.get("iat") or 0)
+    age = int(time.time()) - authenticated_at
+    cap = session_absolute_max()
+    if age >= cap:
+        raise SessionExpired(
+            f"this session has been open for {age // 3600}h — sign in again "
+            f"(the maximum is {cap // 3600}h)")
+    token, binding = _mint_session(sub, claims.get("amr", ["pwd"]),
+                                   auth_time=authenticated_at)
+    return token, binding, session_ttl()
 
 
 # DEV ONLY: bypass sign-in and mint a session directly, gated by config. Never
@@ -762,7 +821,12 @@ def _verify_builtin(token: str, cert_thumbprint: str | None) -> dict | None:
         )
     except jwt.PyJWTError:
         return None
-    if claims["exp"] - claims["iat"] > _ACCESS_TTL:
+    if claims["exp"] - claims["iat"] > _TTL_HARD_CEILING:
+        return None                       # absurd lifetime: reject regardless of settings
+    # The absolute cap applies on every request, not just at refresh: an operator who has
+    # been signed in longer than the cap must re-authenticate even if their current token
+    # has not expired yet.
+    if int(time.time()) - int(claims.get("auth_time") or claims["iat"]) > session_absolute_max():
         return None
     if claims["sub"] in _revoked_subjects:
         return None

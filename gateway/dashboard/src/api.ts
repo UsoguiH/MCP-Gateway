@@ -133,6 +133,36 @@ export async function apiPost<T = any>(path: string, body?: any): Promise<T> {
   return data as T;
 }
 
+// ── Session lifetime (A12) ───────────────────────────────────────────────────
+// The console used to hold one fixed-lifetime token and simply die when it expired —
+// mid-approval, with no warning and no way to stay signed in. Now: renew silently while
+// the operator is working (so the TTL behaves as an idle timeout), warn before expiry when
+// they are not, and let the server's absolute cap force a real re-authentication.
+
+export type SessionState = {
+  expires_in: number;      // seconds left on the current token
+  session_age: number;     // seconds since the operator actually authenticated
+  absolute_max: number;    // hard cap: past this, refresh is refused
+  warn_seconds: number;    // warn this long before expiry
+};
+
+export async function sessionState(): Promise<SessionState | null> {
+  return apiGet<SessionState>("/api/me");
+}
+
+/** Renew the session. Returns the new lifetime, or throws ApiError(401) past the cap. */
+export async function refreshSession(): Promise<number> {
+  const r = await fetch("/api/auth/refresh", { method: "POST", headers: authHeaders() });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    if (r.status === 401) clearSession();
+    throw new ApiError(r.status, data.detail || "Could not extend the session");
+  }
+  const user = getUser();
+  if (user) store(data.token, data.thumbprint, user);   // new token + new binding
+  return data.expires_in as number;
+}
+
 export async function changePassword(oldPassword: string, newPassword: string) {
   const r = await fetch("/api/auth/password", {
     method: "POST",

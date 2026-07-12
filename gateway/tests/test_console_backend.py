@@ -340,6 +340,116 @@ def test_approval_aging_measures_time_to_decide(audit_log):
     assert a["median_decide_seconds"] == 60          # 300s - 240s
 
 
+# ─────────── session policy: idle renewal + absolute cap (A12) ──────────────
+def test_session_ttl_and_cap_come_from_settings(clean_settings):
+    from app import auth
+    clean_settings.update("session", {"ttl_seconds": 1200, "absolute_seconds": 7200})
+    assert auth.session_ttl() == 1200
+    assert auth.session_absolute_max() == 7200
+
+
+def test_refresh_renews_a_live_session_but_keeps_auth_time(clean_settings):
+    """An active operator renews silently — which is what makes ttl_seconds behave as an
+    IDLE timeout. The renewal must NOT reset auth_time, or the absolute cap could be
+    extended forever by simply staying active."""
+    from app import auth
+    clean_settings.update("session", {"ttl_seconds": 900, "absolute_seconds": 28800})
+    token, _binding = auth._mint_session("admin", ["pwd", "otp"])
+    claims = jwt_decode(token)
+    original_auth_time = claims["auth_time"]
+
+    time.sleep(1.05)                                   # so iat/exp visibly move
+    new_token, new_binding, expires_in = auth.refresh_session(claims)
+    new_claims = jwt_decode(new_token)
+
+    assert expires_in == 900
+    assert new_claims["exp"] > claims["exp"]           # the session really was extended
+    assert new_claims["auth_time"] == original_auth_time   # ...but the clock on the CAP did not reset
+    assert new_claims["jti"] != claims["jti"]         # fresh token
+    assert new_binding != _binding                    # fresh binding (replayed by the client)
+
+
+def test_refresh_is_refused_past_the_absolute_cap(clean_settings):
+    """However active you are, the session eventually ends and you re-authenticate."""
+    from app import auth
+    clean_settings.update("session", {"absolute_seconds": 3600})
+    token, _ = auth._mint_session("admin", ["pwd"])
+    claims = jwt_decode(token)
+    claims["auth_time"] = int(time.time()) - 7200      # authenticated two hours ago
+
+    with pytest.raises(auth.SessionExpired) as e:
+        auth.refresh_session(claims)
+    assert "sign in again" in str(e.value)
+
+
+def test_a_session_older_than_the_cap_is_refused_on_every_request(clean_settings):
+    """The cap is enforced on verification, not just at refresh — an unexpired token from a
+    too-old session must stop working."""
+    from app import auth, pki
+    import jwt as pyjwt
+    clean_settings.update("session", {"absolute_seconds": 3600})
+
+    now = int(time.time())
+    binding = "b" * 64
+    stale = {
+        "iss": auth._ISSUER, "aud": auth._AUDIENCE, "sub": "admin", "name": "Admin",
+        "role": "admin", "clearance": "top_secret",
+        "iat": now, "nbf": now, "exp": now + 600,      # token itself is still fresh...
+        "auth_time": now - 7200,                        # ...but the session is 2h old
+        "jti": "x" * 32, "amr": ["pwd"], "acr": "aal1",
+        "cnf": {"x5t#S256": binding}, "pwd_change_required": False,
+    }
+    token = pyjwt.encode(stale, pki.signing_key(), algorithm=auth._ALG)
+    assert auth._verify_builtin(token, binding) is None
+
+
+def jwt_decode(token: str) -> dict:
+    import jwt as pyjwt
+    from app import auth, pki
+    return pyjwt.decode(token, pki.signing_public_pem(), algorithms=[auth._ALG],
+                        issuer=auth._ISSUER, audience=auth._AUDIENCE)
+
+
+# ─────────── argument validation must FAIL CLOSED (task 6a) ─────────────────
+def test_missing_jsonschema_refuses_the_call_instead_of_skipping_validation(monkeypatch):
+    """It used to fail OPEN: with jsonschema absent, every call sailed through unvalidated.
+    A security control that silently switches itself off is worse than one that is absent."""
+    import builtins
+    from app import gateway as gw_mod
+
+    real_import = builtins.__import__
+
+    def _no_jsonschema(name, *a, **k):
+        if name == "jsonschema":
+            raise ModuleNotFoundError("No module named 'jsonschema'")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_jsonschema)
+    tool = {"schema": {"properties": {"q": {"type": "string"}}}}
+    ok, why = gw_mod._validate_args(tool, {"q": "hello"})
+    assert ok is False and "jsonschema" in why
+
+
+def test_a_malformed_tool_schema_blocks_the_call(monkeypatch):
+    """The schema comes from the MCP SERVER — attacker-controlled if that server is
+    compromised or rug-pulled. A deliberately-broken schema used to make validation raise,
+    and we allowed the call: i.e. a way to switch argument validation OFF for a tool."""
+    from app import gateway as gw_mod
+    evil = {"schema": {"properties": {"q": {"type": "not-a-real-type"}}}}
+    ok, why = gw_mod._validate_args(evil, {"q": "anything", "smuggled": "payload"})
+    assert ok is False
+    assert "schema" in why.lower()
+
+
+def test_valid_args_still_pass_and_unexpected_fields_are_rejected():
+    from app import gateway as gw_mod
+    tool = {"schema": {"properties": {"q": {"type": "string"}}, "required": ["q"]}}
+    assert gw_mod._validate_args(tool, {"q": "hello"})[0] is True
+    assert gw_mod._validate_args(tool, {"q": "hi", "extra": 1})[0] is False   # additionalProperties:false
+    assert gw_mod._validate_args(tool, {"q": 42})[0] is False                 # wrong type
+    assert gw_mod._validate_args({"schema": {}}, {"anything": 1})[0] is True  # nothing declared
+
+
 # ─────────── mcp_manager: a bad server must never hang the admin ────────────
 def test_bad_server_fails_fast_instead_of_hanging(monkeypatch):
     """A server with a typo'd path spawns, dies, and never answers the MCP handshake.

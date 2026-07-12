@@ -485,8 +485,32 @@ def dev_userlist():
 
 @app.get("/api/me")
 def me(claims: dict = Depends(current_user)):
+    now = int(time.time())
     return {"sub": claims["sub"], "name": claims["name"],
-            "role": claims["role"], "clearance": claims["clearance"]}
+            "role": claims["role"], "clearance": claims["clearance"],
+            "expires_in": max(0, int(claims["exp"]) - now),
+            "session_age": now - int(claims.get("auth_time") or claims["iat"]),
+            "absolute_max": auth.session_absolute_max(),
+            "warn_seconds": gwsettings.get("session", "warn_seconds")}
+
+
+@app.post("/api/auth/refresh")
+def refresh_session(claims: dict = Depends(current_user)):
+    """Renew a live console session (A12).
+
+    The console held one fixed-lifetime token and simply died when it expired — mid-approval,
+    with no warning and no way to stay signed in. The UI now renews silently while the
+    operator is working (so the TTL behaves as an idle timeout) and warns before expiry when
+    they are not. The absolute cap still forces a real re-authentication.
+    """
+    try:
+        token, binding, expires_in = auth.refresh_session(claims)
+    except auth.SessionExpired as e:
+        raise HTTPException(401, str(e))
+    audit.record("session_refreshed", user=claims["sub"],
+                 session_age=int(time.time()) - int(claims.get("auth_time") or claims["iat"]))
+    return {"token": token, "thumbprint": binding, "expires_in": expires_in,
+            "warn_seconds": gwsettings.get("session", "warn_seconds")}
 
 
 # ---------- tools (REST view for the ops console) ----------

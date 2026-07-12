@@ -91,6 +91,22 @@ def _production_tripwires(config: dict):
     if not proxy_on:
         issues.append("trusted proxy is off (set auth.trusted_proxy.enabled or MCP_TRUSTED_PROXY=1; "
                       "the gateway must run behind the mTLS terminator, not be directly reachable)")
+    # jsonschema enforces `additionalProperties: false` on every tool call. Without it the
+    # gateway now REFUSES calls rather than skipping the check (see gateway._validate_args),
+    # so a missing library is a broken deployment: say so at boot, not on the first call.
+    try:
+        import jsonschema                                            # noqa: F401
+    except ModuleNotFoundError:
+        issues.append("jsonschema is not installed — tool-argument schema validation cannot "
+                      "run and every mediated call will be refused (pip install -r requirements.txt)")
+    # The `docs` and `actions` servers are TEST FIXTURES: in-code sample data and an
+    # in-memory record store the e2e suite drives. They are useful in dev and must never be
+    # reachable by a real user, so production refuses to start with them registered
+    # (H9). Remove them from config.yaml's `servers:` for a production deployment.
+    fixtures = {"docs", "actions"} & {s.get("name") for s in (config.get("servers") or [])}
+    if fixtures:
+        issues.append(f"pilot test fixtures are registered as servers: {sorted(fixtures)} — "
+                      "remove them from config.yaml `servers:` before serving real users")
     if issues:
         strict = os.environ.get("MCP_ENV", "").lower() in ("production", "prod")
         header = "PRODUCTION CONFIG CHECK FAILED:" if strict else \

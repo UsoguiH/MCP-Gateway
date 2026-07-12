@@ -28,6 +28,7 @@ import {
   useDashboard, RANGES, ms, type Range, type Dashboard, type ServerRow,
 } from "./data";
 import { useApi } from "./useApi";
+import { useSessionGuard } from "./session";
 import { getUser, logout as apiLogout, apiPost, type User } from "@/api";
 import { LoginScreen, ChangePasswordScreen } from "./Login";
 import {
@@ -1197,6 +1198,71 @@ function AlertsPage() {
   );
 }
 
+// Session policy (A12): the console used to sign you out at ~10-15 minutes with no warning
+// and no setting anywhere. These are the knobs behind that.
+function SessionPolicy() {
+  const { data: st, reload } = useApi<any>("/api/admin/settings");
+  const [edit, setEdit] = useState<{ key: string; label: string; hint: string; value: number } | null>(null);
+  const s = st?.effective?.session;
+  if (!s) return null;
+
+  const save = async () => {
+    if (!edit) return;
+    try {
+      await apiPost("/api/admin/settings", { section: "session", patch: { [edit.key]: edit.value } });
+      setEdit(null); reload();
+      toast("Session policy updated — applies to the next sign-in or renewal.");
+    } catch (e: any) { toast(e?.message || "Could not save", "err"); }
+  };
+
+  const mins = (sec: number) => sec >= 3600 ? `${(sec / 3600).toFixed(sec % 3600 ? 1 : 0)} hours`
+    : sec >= 60 ? `${Math.round(sec / 60)} minutes` : `${sec} seconds`;
+
+  const rows = [
+    { key: "ttl_seconds", label: "Idle timeout", value: s.ttl_seconds,
+      hint: "How long a session survives with no activity. While you are working it renews silently, so this only bites when you stop." },
+    { key: "absolute_seconds", label: "Maximum session length", value: s.absolute_seconds,
+      hint: "A hard cap regardless of activity. Past it, you must sign in again — no amount of clicking extends it." },
+    { key: "warn_seconds", label: "Expiry warning", value: s.warn_seconds,
+      hint: "How long before expiry the console warns you, with a countdown and a Stay-signed-in button." },
+  ];
+
+  return (
+    <>
+      <CardBox title="Session policy">
+        <table className="w-full">
+          <thead><tr><Th>Setting</Th><Th>Value</Th><Th right>Action</Th></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.key} className="hover:bg-black/[0.02]">
+                <Td><div className="flex flex-col">
+                  <span>{r.label}</span>
+                  <span className="text-xs text-black/40">{r.hint}</span>
+                </div></Td>
+                <Td><span className="text-black/60 whitespace-nowrap">{mins(r.value)}</span></Td>
+                <Td right><GhostBtn onClick={() => setEdit({ ...r })}>Edit</GhostBtn></Td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </CardBox>
+      {edit && (
+        <Modal title={`Edit — ${edit.label}`} onClose={() => setEdit(null)}>
+          <Field label="Seconds">
+            <TextInput type="number" min={15} value={edit.value}
+              onChange={(e) => setEdit({ ...edit, value: Number(e.target.value) })} />
+          </Field>
+          <p className="text-xs text-black/40">{edit.hint}</p>
+          <div className="flex gap-2 justify-end">
+            <GhostBtn onClick={() => setEdit(null)}>Cancel</GhostBtn>
+            <PrimaryBtn onClick={save}>Save</PrimaryBtn>
+          </div>
+        </Modal>
+      )}
+    </>
+  );
+}
+
 function SettingsPage({ d, onChanged }: { d: Dashboard; onChanged: () => void }) {
   const [busy, setBusy] = useState("");
 
@@ -1248,6 +1314,7 @@ function SettingsPage({ d, onChanged }: { d: Dashboard; onChanged: () => void })
         marked <span className="text-black/60">config</span> are deploy-time settings in
         config.yaml and are shown read-only rather than as a switch that does nothing.
       </p>
+      <SessionPolicy />
     </>
   );
 }
@@ -1652,14 +1719,18 @@ function LogoutModal({ onCancel, onConfirm }: { onCancel: () => void; onConfirm:
   );
 }
 
-function LoggedOutScreen({ onSignIn }: { onSignIn: () => void }) {
+function LoggedOutScreen({ onSignIn, reason }: { onSignIn: () => void; reason?: string }) {
   return (
     <div className="flex h-screen w-screen items-center justify-center bg-white" style={{ fontFamily: "Inter, sans-serif" }}>
       <div className="bg-[#f9f9fa] rounded-[20px] p-8 w-[360px] flex flex-col items-center gap-4 text-center">
         <div className="w-10 h-10 rounded-xl bg-[#4C98FD] flex items-center justify-center"><div className="w-4 h-4 bg-white rounded-sm opacity-90" /></div>
         <div className="flex flex-col gap-1">
           <span className="text-sm font-semibold text-black">You've been logged out</span>
-          <span className="text-xs text-black/40 leading-4">Thanks for using MCP Gateway. Sign back in to keep monitoring your servers, tools and traffic.</span>
+          {/* Say WHY. Being dumped on a login screen with no explanation is how an admin
+              loses trust in a console (and their place in an approval queue). */}
+          <span className="text-xs text-black/40 leading-4">
+            {reason || "Thanks for using MCP Gateway. Sign back in to keep monitoring your servers, tools and traffic."}
+          </span>
         </div>
         <button onClick={onSignIn} className="text-xs text-white px-5 py-2 rounded-lg bg-[#1C1C1C] hover:opacity-80">Sign back in</button>
       </div>
@@ -1671,11 +1742,11 @@ function LoggedOutScreen({ onSignIn }: { onSignIn: () => void }) {
 
 const INITIAL_PAGE = ((): Page => {
   const p = new URLSearchParams(location.search).get("p");
-  const all: Page[] = ["Overview", "Servers", "Tools", "Logs", "Clients", "API Keys", "Rate Limits", "Policies", "Alerts", "Settings", "Approvals", "Audit", "Identities", "Registry", "Kill Switch", "Anomaly", "Sessions"];
+  const all: Page[] = ["Overview", "Servers", "Tools", "Logs", "Clients", "API Keys", "Rate Limits", "Policies", "Alerts", "Settings", "Approvals", "Audit", "Identities", "Registry", "Kill Switch", "Anomaly", "Sessions", "Gateway", "DLP"];
   return (all.includes(p as Page) ? p : "Overview") as Page;
 })();
 
-function Dashboard_({ user, onLoggedOut }: { user: User; onLoggedOut: () => void }) {
+function Dashboard_({ user, onLoggedOut }: { user: User; onLoggedOut: (reason?: string) => void }) {
   const [page, setPage] = useState<Page>(INITIAL_PAGE);
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightOpen, setRightOpen] = useState(true);
@@ -1685,7 +1756,11 @@ function Dashboard_({ user, onLoggedOut }: { user: User; onLoggedOut: () => void
   const [logoutOpen, setLogoutOpen] = useState(false);
   const [manage, setManage] = useState<ServerRow | null>(null);
 
-  const onAuthExpired = useCallback(() => onLoggedOut(), [onLoggedOut]);
+  const onAuthExpired = useCallback(() => onLoggedOut("Your session expired. Please sign in again."),
+                                    [onLoggedOut]);
+  // Renews silently while you work (so the TTL is an idle timeout), warns with a countdown
+  // when you are idle, and explains itself when the absolute cap forces a re-login (A12).
+  const session = useSessionGuard(onLoggedOut);
   // The range now drives a real query window against the audit chain (not a curve shape).
   const { data, refresh } = useDashboard(onAuthExpired, range);
   const notif = useNotifications(onAuthExpired);
@@ -1728,7 +1803,8 @@ function Dashboard_({ user, onLoggedOut }: { user: User; onLoggedOut: () => void
       <RightSidebar open={rightOpen} setOpen={setRightOpen} setPage={setPage} d={data}
         notifs={notif.items} unread={notif.unread} onMarkAllRead={notif.markAllRead} onClearRead={notif.clearRead} />
       {manage && <ManageDrawer server={manage} onClose={() => setManage(null)} onChanged={onRefresh} />}
-      {logoutOpen && <LogoutModal onCancel={() => setLogoutOpen(false)} onConfirm={async () => { setLogoutOpen(false); await apiLogout(); onLoggedOut(); }} />}
+      {logoutOpen && <LogoutModal onCancel={() => setLogoutOpen(false)} onConfirm={async () => { setLogoutOpen(false); await apiLogout(); onLoggedOut("Signed out."); }} />}
+      {session.modal}
       <Toaster />
     </div>
   );
@@ -1737,10 +1813,18 @@ function Dashboard_({ user, onLoggedOut }: { user: User; onLoggedOut: () => void
 export default function App() {
   const [user, setUser] = useState<User | null>(getUser());
   const [loggedOut, setLoggedOut] = useState(false);
+  const [logoutReason, setLogoutReason] = useState<string>("");
   const [needsPwChange, setNeedsPwChange] = useState<boolean>(!!getUser()?.password_change_required);
 
+  const signOut = useCallback((reason = "") => {
+    setLogoutReason(reason);
+    setUser(null);
+    setLoggedOut(true);
+  }, []);
+
   if (loggedOut) {
-    return <LoggedOutScreen onSignIn={() => { setLoggedOut(false); setUser(null); }} />;
+    return <LoggedOutScreen reason={logoutReason}
+      onSignIn={() => { setLoggedOut(false); setLogoutReason(""); setUser(null); }} />;
   }
   if (!user) {
     return <LoginScreen onDone={(u) => { setUser(u); setNeedsPwChange(!!u.password_change_required); }} />;
@@ -1748,7 +1832,7 @@ export default function App() {
   if (needsPwChange) {
     return <ChangePasswordScreen
       onDone={() => setNeedsPwChange(false)}
-      onLogout={async () => { await apiLogout(); setUser(null); setLoggedOut(true); }} />;
+      onLogout={async () => { await apiLogout(); signOut(); }} />;
   }
-  return <Dashboard_ user={user} onLoggedOut={() => { setUser(null); setLoggedOut(true); }} />;
+  return <Dashboard_ user={user} onLoggedOut={signOut} />;
 }

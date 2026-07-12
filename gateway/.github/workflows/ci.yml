@@ -23,8 +23,22 @@ jobs:
         run: pip install -r requirements.txt
       - name: Dependency allowlist check
         run: python scripts/check_deps.py
-      - name: Unit + fuzz tests (no server)
-        run: python -m pytest tests/test_security.py tests/test_auth.py tests/test_fuzz.py -q
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Dashboard builds, and the committed ui/ bundle matches its source
+        # ui/ is a build artefact that the gateway SERVES. Without this, a UI change that
+        # was never rebuilt would ship the old bundle: review passes, tests pass, and the
+        # deployed console is not the code in the repo.
+        run: |
+          npm ci --prefix dashboard
+          python scripts/check_ui_build.py
+      - name: Offline tests (no server, no docker)
+        run: |
+          python -m pytest tests/ -q \
+            --ignore=tests/test_e2e.py \
+            --ignore=tests/test_oauth.py \
+            --ignore=tests/test_admin_controls.py
       - name: End-to-end tests (server up)
         run: |
           python -m uvicorn app.main:app --host 127.0.0.1 --port 8800 --log-level warning &
