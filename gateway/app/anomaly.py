@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 from collections import Counter, defaultdict
 
-from . import audit, auth
+from . import audit, auth, settings
 from .controls import kill_switch
 
 
@@ -22,35 +22,57 @@ def _mk(sev: str, key: str, title: str, detail: str, source: str, ts=None, count
             "source": source, "ts": ts, "count": count}
 
 
-def evaluate(gw, *, window: int = 500, approval_sla_seconds: int = 900,
-             login_fail_threshold: int = 3, error_rate_threshold: float = 0.20) -> dict:
+def evaluate(gw, *, window: int | None = None, approval_sla_seconds: int | None = None,
+             login_fail_threshold: int | None = None,
+             error_rate_threshold: float | None = None) -> dict:
     """Compute the current alert set. `gw` is the Gateway (for breaker/registry/
-    approvals). Reads the last `window` audit records for behavioural signals."""
+    approvals). Reads the last `window` audit records for behavioural signals.
+
+    Thresholds default to the runtime settings overlay (admin-editable in the console),
+    and each rule can be switched off there — the Alerts page toggles are now real
+    (A3/A6). Explicit keyword args still win, so tests can pin exact values.
+    """
+    cfg = settings.get("anomaly")
+    window = int(window if window is not None else cfg["window"])
+    approval_sla_seconds = int(approval_sla_seconds if approval_sla_seconds is not None
+                               else cfg["approval_sla_seconds"])
+    login_fail_threshold = int(login_fail_threshold if login_fail_threshold is not None
+                               else cfg["login_fail_threshold"])
+    error_rate_threshold = float(error_rate_threshold if error_rate_threshold is not None
+                                 else cfg["error_rate_threshold"])
+    on = settings.alert_rule_enabled
+
     alerts: list[dict] = []
     now = time.time()
     records = audit.tail(window)
 
     # 1. Audit chain integrity — tamper evidence. Highest priority.
-    ok, msg = audit.verify_chain()
+    # Cached full verification: a tamper alert that is at most 60 s old is exactly right
+    # for an alert engine, and an O(n) HMAC re-pass on every poll of the Anomaly page
+    # would cost seconds of CPU per request.
+    ok, msg = audit.chain_status()
     if not ok:
         alerts.append(_mk("critical", "audit_chain", "Audit chain integrity FAILED",
                           msg, "audit", now))
 
     # 2. Circuit breakers open — a server is failing or quarantined.
-    for server, b in gw._breaker.items():
-        if gw._breaker_open(server):
-            alerts.append(_mk("critical", f"breaker:{server}",
-                              f"Circuit breaker open — {server}",
-                              f"{server} exceeded the failure threshold and is quarantined "
-                              f"({b.get('fails', 0)} consecutive failures).", "circuit-breaker", now))
+    if on("breaker_open"):
+        for server, b in gw._breaker.items():
+            if gw._breaker_open(server):
+                alerts.append(_mk("critical", f"breaker:{server}",
+                                  f"Circuit breaker open — {server}",
+                                  f"{server} exceeded the failure threshold and is quarantined "
+                                  f"({b.get('fails', 0)} consecutive failures).",
+                                  "circuit-breaker", now))
 
     # 3. Registry: quarantined tools (rug-pull / definition drift).
-    for e in gw.registry.entries.values():
-        if e.get("status") == "quarantined":
-            alerts.append(_mk("critical", f"quarantine:{e['server']}:{e['tool']}",
-                              f"Tool quarantined — {e['server']}.{e['tool']}",
-                              f"Reason: {e.get('quarantine_reason', 'definition drift')}. "
-                              "Review and re-pin before it can run again.", "registry", now))
+    if on("tool_quarantine"):
+        for e in gw.registry.entries.values():
+            if e.get("status") == "quarantined":
+                alerts.append(_mk("critical", f"quarantine:{e['server']}:{e['tool']}",
+                                  f"Tool quarantined — {e['server']}.{e['tool']}",
+                                  f"Reason: {e.get('quarantine_reason', 'definition drift')}. "
+                                  "Review and re-pin before it can run again.", "registry", now))
 
     # 4. Pending tool onboarding — new tools awaiting Risk-Board approval.
     pending = gw.registry.pending()
@@ -62,7 +84,7 @@ def evaluate(gw, *, window: int = 500, approval_sla_seconds: int = 900,
 
     # 5. Approval-queue SLA — Tier-2/3 actions waiting too long go unnoticed.
     stale = [p for p in gw.approvals.list_pending()
-             if now - p.get("created", now) > approval_sla_seconds]
+             if now - p.get("created", now) > approval_sla_seconds] if on("approval_sla") else []
     if stale:
         oldest = max(now - p.get("created", now) for p in stale)
         alerts.append(_mk("warning", "approval_sla",
@@ -99,7 +121,7 @@ def evaluate(gw, *, window: int = 500, approval_sla_seconds: int = 900,
             last_ts_by_key[ev] = ts
 
     # 6. Brute-force / credential stuffing — repeated login failures per identity.
-    for user, n in login_fails.items():
+    for user, n in (login_fails.items() if on("login_failures") else []):
         if n >= login_fail_threshold:
             alerts.append(_mk("warning", f"loginfail:{user}",
                               f"Repeated login failures — {user}",
@@ -108,7 +130,7 @@ def evaluate(gw, *, window: int = 500, approval_sla_seconds: int = 900,
                               "auth", last_ts_by_key.get("login_failed"), count=n))
 
     # 7. Locked-out identities (anti-hammering fired).
-    lk = _safe(auth.lockout_status, {})
+    lk = _safe(auth.lockout_status, {}) if on("lockout") else {}
     for sub, v in (lk or {}).items():
         alerts.append(_mk("warning", f"lockout:{sub}", f"Identity locked out — {sub}",
                           f"{v.get('fails', 0)} failed attempts; auto-unlocks in "
@@ -116,7 +138,7 @@ def evaluate(gw, *, window: int = 500, approval_sla_seconds: int = 900,
                           "auth", now))
 
     # 8. Elevated tool error rate — a backend or agent is misbehaving.
-    if tool_total >= 10:
+    if tool_total >= 10 and on("error_rate"):
         rate = tool_errors / tool_total
         if rate >= error_rate_threshold:
             alerts.append(_mk("warning", "error_rate",

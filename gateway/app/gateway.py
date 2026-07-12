@@ -22,7 +22,7 @@ import base64
 import json
 import time
 
-from . import audit, authz, classification, dlp, unicode_guard
+from . import audit, authz, classification, dlp, selfinfo, unicode_guard
 from .approvals import ApprovalStore
 from .config import DATA_DIR, GATEWAY, clearance_rank
 from .controls import kill_switch, rate_limiter, server_limiter, tool_limiter
@@ -126,6 +126,15 @@ class Gateway:
         tool = call.get("tool", "")
         arguments = call.get("arguments", {}) or {}
         user = claims["sub"]
+
+        # 0. maintenance mode: pause mediated work during a patch/migration without the
+        # finality of a kill switch, and without locking admins out of the console.
+        # Admins keep working so they can fix whatever the maintenance is for.
+        maint = selfinfo.maintenance_status()
+        if maint.get("enabled") and claims.get("role") != "admin":
+            return self._blocked(server, tool,
+                                 f"gateway in maintenance: {maint.get('message', '')}".strip(),
+                                 user, arguments)
 
         # 1. kill switch
         blocked = kill_switch.blocked(user=user, server=server, tool=tool)
@@ -245,16 +254,23 @@ class Gateway:
         call_args = dict(arguments)
         if cred:
             call_args[_INJECTED_PARAM] = cred["secret"]
+        # A5: time every dispatch. Without this the gateway has no latency data at all —
+        # every "avg"/"latency" column in the console was an em-dash, and slow-drip
+        # exfiltration or a degrading backend had nothing to show up in.
+        t0 = time.perf_counter()
         try:
             raw, blocks = await self.mcp.call(server, tool, call_args)
         except Exception as exc:
+            duration_ms = round((time.perf_counter() - t0) * 1000, 1)
             if cred:
                 vault.revoke(cred["lease"])
             self._breaker_trip(server)          # circuit breaker: track failures
             audit.record("tool_error", user=claims["sub"], server=server, tool=tool,
-                         error=str(exc)[:200])
+                         error=str(exc)[:200], duration_ms=duration_ms)
             return {"server": server, "tool": tool, "status": "error",
-                    "reason": f"tool call failed: {exc}", "tier": tier}
+                    "reason": f"tool call failed: {exc}", "tier": tier,
+                    "duration_ms": duration_ms}
+        duration_ms = round((time.perf_counter() - t0) * 1000, 1)
         self._breaker_reset(server)
         if cred:
             audit.record("credential_injected", user=claims["sub"], server=server, tool=tool,
@@ -268,14 +284,14 @@ class Gateway:
             approved_id=approved_id, truncated=g["truncated"], classification=g["classification"],
             result_digest=audit.payload_digest(g["masked"]),
             pii_detected=g["pii_detected"], pii_masked=g["pii_masked"],
-            result_unicode_flags=g["result_unicode_flags"],
+            result_unicode_flags=g["result_unicode_flags"], duration_ms=duration_ms,
         )
         return {
             "server": server, "tool": tool, "status": "executed", "tier": tier,
             "result": g["masked"], "content_blocks": blocks, "truncated": g["truncated"],
             "classification": g["classification"], "pii_detected": g["pii_detected"],
             "pii_masked": g["pii_masked"], "result_unicode_flags": g["result_unicode_flags"],
-            "approved_id": approved_id,
+            "approved_id": approved_id, "duration_ms": duration_ms,
         }
 
     def _govern(self, claims, session, source, data_class, raw):
@@ -331,20 +347,23 @@ class Gateway:
             return {"status": "blocked", "reason": "circuit open: server temporarily quarantined"}
         if server in self.drained:
             return {"status": "blocked", "reason": "server drained by administrator"}
+        t0 = time.perf_counter()
         try:
             raw, blobs = await self.mcp.read_resource(server, orig)
         except Exception as exc:
             self._breaker_trip(server)
             audit.record("resource_error", user=user, server=server,
-                         uri_digest=audit.payload_digest(orig), error=str(exc)[:200])
+                         uri_digest=audit.payload_digest(orig), error=str(exc)[:200],
+                         duration_ms=round((time.perf_counter() - t0) * 1000, 1))
             return {"status": "error", "reason": f"resource read failed: {exc}"}
+        duration_ms = round((time.perf_counter() - t0) * 1000, 1)
         self._breaker_reset(server)
         # resources carry no registry tier; govern at the fail-toward-protected default.
         g = self._govern(claims, user, f"{server}:resource", classification.tool_classification(None), raw)
         audit.record("resource_read", user=user, server=server, uri_digest=audit.payload_digest(orig),
                      classification=g["classification"], pii_detected=g["pii_detected"],
                      pii_masked=g["pii_masked"], truncated=g["truncated"],
-                     result_unicode_flags=g["result_unicode_flags"])
+                     result_unicode_flags=g["result_unicode_flags"], duration_ms=duration_ms)
         text = g["masked"] if isinstance(g["masked"], str) else json.dumps(g["masked"], ensure_ascii=False)
         return {"status": "executed", "server": server, "uri": wrapped_uri, "text": text,
                 "blobs": blobs, "classification": g["classification"], "pii_masked": g["pii_masked"]}

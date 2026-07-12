@@ -118,7 +118,7 @@ def _as_text(payload) -> str:
 # (and our tests / an ops console) can see WHY a call was allowed, masked, or held.
 _META_KEYS = ("status", "tier", "classification", "pii_masked", "pii_detected",
               "taint", "unicode_flags", "result_unicode_flags", "approval_id",
-              "approvals_required", "reason", "truncated")
+              "approvals_required", "reason", "truncated", "duration_ms")
 
 
 def _mcp_result(step: dict) -> dict:

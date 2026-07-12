@@ -5,7 +5,12 @@ pyjwt[crypto]>=2.10,<3.0
 cryptography>=44,<50
 pyyaml>=6.0,<7.0
 httpx>=0.27,<1.0
-mcp>=1.2,<2.0
+# Pinned, not a range: the old `>=1.2,<2.0` let the SDK drift to 1.8.1, whose FastMCP
+# calls issubclass() on raw annotations. Every server module that used
+# `from __future__ import annotations` (string annotations) then failed to import — all
+# four production connectors died and the gateway could not boot. Upgrade deliberately,
+# with the suite green. See tests/test_servers_import.py.
+mcp==1.8.1
 psycopg[binary]>=3.2,<4.0     # postgres-mcp server (servers/postgres_server.py)
 jsonschema>=4.21,<5.0         # W9.6 tool-arg schema enforcement (must never be transitive-only)
 

@@ -67,10 +67,10 @@ the single most important sentence an accreditor will read in this document.
 
 | Layer | 07-06 | Now | What moved |
 |---|---:|---:|---|
-| Control-plane software (the security engine) | 90% | **92%** | + OAuth 2.1 AS, admin control surface, notifications. Remaining: DB-backed state, settings write-back, per-server rate overrides |
+| Control-plane software (the security engine) | 90% | **95%** | + OAuth 2.1 AS, admin control surface, notifications, and the Phase-2 console/insights/settings layer. Remaining: DB-backed state (Phase 3) |
 | Data connectors (MCP servers) | 55% | **80%** | postgres ✓ gitea ✓ files ✓ reports ✓ opendata ✓. Remaining: scoped Gitea machine token, org system-of-record DB [D2], activate pending files tools |
 | Production infrastructure (TLS/mTLS, secrets, DB, HA) | 20% | **35%** | Prod compose stack live (postgres:17 + nginx mTLS + Docker secrets). Remaining: HA, DB state, org PKI, offsite backups, secret manager |
-| Operations & governance (backups, SIEM, runbooks, sign-off) | 25% | **32%** | Admin console + live QA + backup schedule. Remaining: SIEM, alert delivery, DR drills, IR playbooks, accreditation |
+| Operations & governance (backups, SIEM, runbooks, sign-off) | 25% | **38%** | Admin console (complete), live QA, backup schedule + backup/cert/disk visibility. Remaining: SIEM, alert delivery, DR drills, IR playbooks, accreditation |
 
 ## 4. What exists today (verified inventory, 2026-07-12)
 
@@ -99,10 +99,13 @@ off; operator lifecycle (create/offboard/role/MFA/reset/sign-out-everywhere) in 
 | opendata-mcp | 9 | RO | Saudi Open Data portal (public) | live; 2 tools quarantined on drift — needs review |
 | docs / actions | 2 / 4 | fixtures | in-code | pilot fixtures — retire before rollout |
 
-**Console** — React 18/Vite/Tailwind 4 SPA (17 pages) served by the gateway; all governance
-surfaces wired to real APIs (approvals, registry, identities, kill switch, audit, anomaly,
-sessions, API keys/OAuth clients, servers, notifications). Known cosmetic mocks: Overview
-trend/latency charts, rate-limit usage bars, Alerts/Settings toggles (§7).
+**Console** — React 18/Vite/Tailwind 4 SPA (**19 pages**) served by the gateway. Every
+governance surface is wired to a real API (approvals, registry, identities, kill switch,
+audit, anomaly, sessions, API keys/OAuth clients, servers, notifications) and, since Phase 2,
+**every number shown is measured and every control does something**: real traffic/latency
+charts from recorded per-call durations, live rate-limit consumption, persisted settings, a
+Gateway self-page (version, uptime, backups, certificate expiry, disk growth, maintenance
+mode) and a DLP activity page.
 
 **Deployment** — `docker-compose.prod.yml`: postgres:17 (pgdata volume) + gateway
 (`MCP_ENV=production`, tripwires make dev secrets fatal) + nginx mTLS terminator (:8443 only
@@ -111,9 +114,10 @@ entry; :8080 redirects). Secrets are Docker file-secrets under `deploy/secrets/`
 (`scripts/backup.ps1`: pg_dump + gw-data + gw-pki + Gitea; 14-day retention;
 **same-disk — offsite pending**).
 
-**Verification** — 148 test functions across 10 files (security units, auth, hardening,
-fuzz, OAuth, admin controls, approvals lifecycle, files server, live e2e, 38/35-step
-postgres/gitea lifecycle against `mcp-test-pg`/`mcp-test-gitea` docker fixtures).
+**Verification** — **193 test functions across 13 files**, all green (security units, auth,
+hardening, fuzz, OAuth, admin controls, approvals lifecycle, files server, the console
+back-end + settings overlay, the server-import guard, the artifact purge, live e2e, and the
+38/35-step postgres/gitea lifecycle against `mcp-test-pg`/`mcp-test-gitea` docker fixtures).
 
 ## 5. The four pillars — honest assessment
 
@@ -128,8 +132,12 @@ postgres/gitea lifecycle against `mcp-test-pg`/`mcp-test-gitea` docker fixtures)
 - **Works with local AI — Strong, one step from proven.** OAuth 2.1 self-onboarding + the
   `/connect` wizard exist and are tested through the live mTLS proxy. The **employee-zero
   smoke test on a real client machine is still outstanding** — it is do-now item #1.
-- **Performance — Not yet proven.** Single instance, in-memory sessions/rate-windows/breaker
-  state, flat-file persistence. `scripts/loadtest.py` exists but no 300-concurrent run has
+- **Performance — Now measurable, still unproven at scale.** Phase 2 added per-call duration
+  to the audit chain, so latency is observable for the first time (early figures on the docs
+  connector: p50 7 ms, p95 14 ms of gateway-mediated overhead). It also removed a real
+  bottleneck: `/api/health` was re-verifying the entire audit chain on every request (3.6 s of
+  CPU at 6.5k records, growing linearly). Still single-instance with in-memory
+  sessions/rate-windows/breaker state and flat-file persistence; no 300-concurrent run has
   been recorded. Fixed by Phase 3.
 
 ## 6. What we haven't built yet
@@ -322,24 +330,53 @@ test, key custody, org PKI, DR, compliance matrix, formal risk acceptance._
   lifecycle, server lifecycle, notification center; **live-QA-verified** via `ciadmin`
   browser walkthrough (11 tests).
 
-### Phase 2 — Truth, hygiene & console completion (L, ~3–4 weeks)
+### Phase 2 — Truth, hygiene & console completion (L, ~3–4 weeks) — **tasks 1–4 ✅ 2026-07-12**
 _Goal: everything the system shows and every claim the docs make is true; the admin console
 does **everything an admin needs** — no backend-only controls, no inert toggles, no blind
 spots from the §7b register; the repo is clean enough to hand to an auditor; the last cheap
 security wins land._
 
+**Progress (2026-07-12):** tasks 1–4 done — hygiene, the test-artifact purge, the dashboard
+truth pass, and the full console build-out. Suite: **193 tests green** (was 148). Remaining:
+tasks 5–10 (session policy, security quick wins, test debt, docs, governance sweep,
+employee-zero).
+
+> **Four production defects were found and fixed while building this** — all pre-existing,
+> none previously caught by a test:
+> 1. **The gateway could not boot at all.** `mcp` was pinned to a *range* (`>=1.2,<2.0`) and
+>    drifted to 1.8.1, whose FastMCP calls `issubclass()` on raw annotations — so every
+>    server module using `from __future__ import annotations` failed to import. All four
+>    production connectors were dead. SDK pinned; guard test added
+>    (`tests/test_servers_import.py`) so an SDK bump fails CI instead of production.
+> 2. **`/api/health` re-verified the entire audit chain on every request** — a 3.6 s CPU
+>    pass at 6.5k records, run by the container healthcheck every 30 s and by every
+>    dashboard poll, growing linearly with the log. Now a cached full verification (60 s
+>    TTL, 5 ms warm); the console's Re-verify button forces a fresh pass.
+> 3. **Stopping or removing a server could hang forever.** The stdio teardown is entered on
+>    another task, so closing it from a request task hangs (anyio cross-task cancel scope).
+>    The teardown is now detached — the request returns immediately.
+> 4. **Adding a server with a typo'd path hung the admin request indefinitely**, holding a
+>    worker: a dead subprocess never answers the MCP handshake. The handshake is now
+>    bounded (30 s) and fails as a clean 502 naming the likely cause.
+
 Tasks:
-1. Repo hygiene: delete H1 stray artifacts and H8 dead code (`ui.backup-vanilla/`,
+1. **✅ Repo hygiene** (2026-07-12, commit 9e2222c): delete H1 stray artifacts and H8 dead code (`ui.backup-vanilla/`,
    `Login-page.txt`, `qwen_chat.py`); delete the H16 TOTP QR images (re-enroll the affected
    accounts if the images were ever shared); rotate the H2 OpenRouter key and move
    `MCP_APP_PASSWORD` into `deploy/secrets/`; commit the pending `ADMIN-CONTROLS.md`.
-2. Test-data purge script (H3): sweep `pytest-*` artifacts from registry/OAuth/notification
-   stores; run it in CI teardown so pollution can't recur.
-3. Dashboard truth pass (A3–A5, A9, A16, A19 / H4, H5, H10): replace canned deltas with real
-   audit-derived deltas; **record per-call duration in audit records** (small backend change),
-   then chart real latency; derive a real traffic time-series by bucketing audit timestamps;
-   wire rate-limit usage to live counters; persist Alerts/Settings toggles for real; real
-   re-tier dialog replacing `window.prompt()`.
+2. **✅ Test-data purge script** (2026-07-12): `scripts/purge_test_artifacts.py` sweeps
+   `pytest-*` artifacts from the registry, OAuth clients/refresh tokens, API keys, temp
+   operators (+ their credentials and MFA secrets), dynamic servers and notification noise;
+   wired into CI teardown so pollution cannot recur. 59 stale OAuth clients, 5 temp
+   operators and 2 pending test tools removed from the dev store (H3).
+3. **✅ Dashboard truth pass** (2026-07-12) — A3–A5, A9, A16, A19 / H4, H5, H10.
+   Per-call durations are now recorded in the audit chain, so latency is *measured*
+   everywhere it appears (verified live: p50 7.0 ms, p95 13.6 ms on real calls). The canned
+   "+11.01%" deltas, the hardcoded Mon–Sun latency curve, the synthetic traffic series and
+   the stdio=100 transport pie are gone — replaced by real aggregates (`app/insights.py`).
+   Rate-limit bars show live consumption; Alerts/Settings toggles persist; re-tier is a real
+   dialog. Where a value genuinely does not exist yet the UI renders "—" rather than invent
+   one.
 4. **Admin console completion — everything the admin needs, real and in the UI.** Works down
    the §7b register (the ADMIN-CONTROLS backlog pulled forward from Phase 4, plus the
    walkthrough discoveries):

@@ -112,7 +112,7 @@ export function ApiKeysPage({ onAuthExpired }: { onAuthExpired: () => void }) {
       <CardBox title="OAuth clients (Connect-your-AI)" right={<span className="text-xs text-black/40">{clientRows.length} registered</span>}>
         {clientRows.length === 0 ? <Empty label="No OAuth clients registered." /> : (
           <div className="overflow-x-auto"><table className="w-full">
-            <thead><tr><Th>Client</Th><Th>Client ID</Th><Th>Authorized by</Th><Th right>Refresh tokens</Th><Th>Registered</Th><Th right></Th></tr></thead>
+            <thead><tr><Th>Client</Th><Th>Client ID</Th><Th>Authorized by</Th><Th right>Refresh tokens</Th><Th>Registered</Th><Th>Last used</Th><Th right></Th></tr></thead>
             <tbody>
               {clientRows.map((c) => (
                 <tr key={c.client_id} className="hover:bg-black/[0.02]">
@@ -121,6 +121,9 @@ export function ApiKeysPage({ onAuthExpired }: { onAuthExpired: () => void }) {
                   <Td><span className="text-black/60 text-xs">{(c.subjects || []).join(", ") || "—"}</span></Td>
                   <Td right>{c.active_refresh_tokens}</Td>
                   <Td><span className="text-black/60">{fmtDate(c.created)}</span></Td>
+                  {/* A dead registration that should be revoked — or one that woke up after
+                      six months — is only visible if we show when it was last used (A21). */}
+                  <Td><span className="text-black/60">{relTime(c.last_used)}</span></Td>
                   <Td right>
                     <button onClick={() => setRevokeClient(c)} className="text-xs px-3 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04] flex items-center gap-1 ml-auto" style={{ color: "#D9534F" }}><Ban size={12} /> Revoke</button>
                   </Td>

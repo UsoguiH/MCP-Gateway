@@ -51,6 +51,46 @@ const APPR_STATUS_COLOR: Record<string, string> = {
   approved: "#4AA785", rejected: "#D9534F", expired: "#E5A000", pending: "#6B9FD4",
 };
 
+// Queue health (A18): what is rotting right now, and how fast decisions actually happen.
+// A request quietly aging toward its 24-hour TTL is a stalled action nobody is watching.
+function ApprovalAging() {
+  const { data } = useApi<any>("/api/admin/approvals/aging");
+  if (!data || (!data.pending_count && !data.decided_samples)) return null;
+  const mins = (s: number) => s < 60 ? `${Math.round(s)}s` : s < 3600 ? `${Math.round(s / 60)}m` : `${Math.round(s / 3600)}h`;
+  const breach = data.breaching_sla > 0;
+  return (
+    <div className="rounded-[20px] p-4 flex items-center gap-6 flex-wrap"
+      style={{ background: breach ? "#fdf3e0" : "#f9f9fa" }}>
+      {breach && <TriangleAlert size={18} style={{ color: "#E5A000" }} />}
+      <div className="flex flex-col">
+        <span className="text-xs text-black/40">Breaching SLA</span>
+        <span className="text-sm font-semibold" style={{ color: breach ? "#8a6100" : undefined }}>
+          {data.breaching_sla} of {data.pending_count} (SLA {mins(data.sla_seconds)})
+        </span>
+      </div>
+      <div className="flex flex-col">
+        <span className="text-xs text-black/40">Oldest waiting</span>
+        <span className="text-sm font-semibold">{data.oldest_seconds ? mins(data.oldest_seconds) : "—"}</span>
+      </div>
+      <div className="flex flex-col">
+        <span className="text-xs text-black/40">Median time to decide</span>
+        <span className="text-sm font-semibold">
+          {data.decided_samples ? mins(data.median_decide_seconds) : "—"}
+        </span>
+      </div>
+      <div className="flex flex-col">
+        <span className="text-xs text-black/40">p95 time to decide</span>
+        <span className="text-sm font-semibold">
+          {data.decided_samples ? mins(data.p95_decide_seconds) : "—"}
+        </span>
+      </div>
+      <span className="text-xs text-black/40 ml-auto">
+        measured from the audit chain · {data.decided_samples} decision(s)
+      </span>
+    </div>
+  );
+}
+
 export function ApprovalsPage({ onAuthExpired }: { onAuthExpired: () => void }) {
   const { data, loading, reload } = useApi<{ pending: any[] }>("/api/approvals", onAuthExpired);
   const [tab, setTab] = useState<"pending" | "history">("pending");
@@ -79,6 +119,7 @@ export function ApprovalsPage({ onAuthExpired }: { onAuthExpired: () => void }) 
           ))}
         </div>
       </div>
+      {tab === "pending" && <ApprovalAging />}
       {tab === "history" ? (
         history.length === 0 ? <CardBox><Empty label="No resolved approvals yet." /></CardBox> : (
           <CardBox title="Resolved approvals — who decided what, when">
@@ -136,49 +177,133 @@ export function ApprovalsPage({ onAuthExpired }: { onAuthExpired: () => void }) 
 // ══════════════════════════════════════════════════════════════════════════════
 // 2. AUDIT — tamper-evident chain integrity + security event stream
 // ══════════════════════════════════════════════════════════════════════════════
+// Investigation, not just a tail (A2). Server-side filters over the WHOLE chain,
+// pagination, and CSV/JSON export — "what did khalid touch last Tuesday?" is now a
+// question the console can answer, instead of an SSH session and a grep.
+const PAGE_SIZE = 50;
+
 export function AuditPage({ query, onAuthExpired }: { query: string; onAuthExpired: () => void }) {
-  const { data, loading, reload } = useApi<{ chain_ok: boolean; chain_status: string; records: any[] }>("/api/admin/audit", onAuthExpired);
-  const [filter, setFilter] = useState("");
-  const records = [...(data?.records ?? [])].reverse();
-  const types = Array.from(new Set(records.map((r) => r.event))).sort();
-  const q = query.toLowerCase();
-  const rows = records.filter((r) =>
-    (!filter || r.event === filter) &&
-    (!q || (r.event || "").toLowerCase().includes(q) || (r.user || "").toLowerCase().includes(q) || (r.server || "").toLowerCase().includes(q)));
+  const [f, setF] = useState({ event: "", user: "", server: "", tool: "", text: "", since: "", until: "" });
+  const [offset, setOffset] = useState(0);
+  const { data: facets } = useApi<any>("/api/admin/audit/facets", onAuthExpired);
+
+  const qs = new URLSearchParams();
+  if (f.event) qs.set("event", f.event);
+  if (f.user) qs.set("user", f.user);
+  if (f.server) qs.set("server", f.server);
+  if (f.tool) qs.set("tool", f.tool);
+  if (f.text || query) qs.set("text", f.text || query);
+  if (f.since) qs.set("since", String(Date.parse(f.since) / 1000));
+  if (f.until) qs.set("until", String(Date.parse(f.until) / 1000));
+  qs.set("limit", String(PAGE_SIZE));
+  qs.set("offset", String(offset));
+
+  const { data, loading, reload } = useApi<any>(`/api/admin/audit?${qs}`, onAuthExpired);
+  const rows: any[] = data?.records ?? [];
+  const total = data?.total ?? 0;
+
+  const set = (k: string, v: string) => { setF({ ...f, [k]: v }); setOffset(0); };
+  const clear = () => { setF({ event: "", user: "", server: "", tool: "", text: "", since: "", until: "" }); setOffset(0); };
+  const active = Object.values(f).some(Boolean) || !!query;
+
+  const exportAs = (fmt: "csv" | "json") => {
+    const e = new URLSearchParams(qs);
+    e.set("fmt", fmt); e.delete("limit"); e.delete("offset");
+    // Same filters as the view on screen — you export what you are looking at.
+    window.open(`/api/admin/audit/export?${e}`, "_blank");
+  };
+
   const secColor = (ev: string) => /fail|error|revoked|quarantine|locked|denied|step_up/i.test(ev) ? "#D9534F"
-    : /killswitch|drift|approval|onboard|retier|revoke/i.test(ev) ? "#E5A000" : "#4AA785";
+    : /killswitch|drift|approval|onboard|retier|revoke|reject|maintenance/i.test(ev) ? "#E5A000" : "#4AA785";
+
   return (
     <>
-      <Head title="Audit" count={`${records.length} events`} />
-      <div className={`rounded-[20px] p-4 flex items-center gap-3 ${data?.chain_ok ? "" : ""}`} style={{ background: data?.chain_ok ? "#e3f5e5" : "#fbe6e6" }}>
+      <Head title="Audit" count={loading ? "…" : `${total} matching events`} />
+      <div className="rounded-[20px] p-4 flex items-center gap-3" style={{ background: data?.chain_ok ? "#e3f5e5" : "#fbe6e6" }}>
         {data?.chain_ok ? <ShieldCheck size={18} style={{ color: "#4AA785" }} /> : <ShieldAlert size={18} style={{ color: "#D9534F" }} />}
         <div className="flex flex-col">
           <span className="text-sm font-semibold text-black">{loading ? "Verifying…" : data?.chain_ok ? "Audit chain intact" : "Audit chain integrity FAILED"}</span>
           <span className="text-xs text-black/50">{data?.chain_status || "HMAC-SHA256 hash-chained, tamper-evident"}</span>
         </div>
-        <button onClick={reload} className="ml-auto text-xs px-3 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04] flex items-center gap-1"><RotateCw size={12} /> Re-verify</button>
+        {/* Forces a FULL chain re-verification (the listing itself reads a short-lived
+            cached result — an O(n) HMAC pass on every poll is what made the gateway slow). */}
+        <button onClick={async () => {
+          try {
+            const v: any = await apiGet("/api/admin/audit/verify");
+            toast(v.chain_ok ? `Chain verified — ${v.chain_status}` : `TAMPERING: ${v.chain_status}`,
+              v.chain_ok ? "ok" : "err");
+            reload();
+          } catch (e: any) { toast(e?.message || "Verification failed", "err"); }
+        }} className="ml-auto text-xs px-3 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04] flex items-center gap-1">
+          <RotateCw size={12} /> Re-verify
+        </button>
       </div>
-      <CardBox right={
-        <select value={filter} onChange={(e) => setFilter(e.target.value)} className="text-xs text-black bg-white border border-black/10 rounded-lg px-2 py-1 outline-none">
-          <option value="">All events</option>
-          {types.map((t) => <option key={t} value={t}>{t}</option>)}
-        </select>
-      } title="Security events">
-        {rows.length === 0 ? <Empty label="No events." /> : (
-          <div className="overflow-x-auto"><table className="w-full">
-            <thead><tr><Th>Time</Th><Th>Event</Th><Th>Identity</Th><Th>Target</Th><Th right>Digest</Th></tr></thead>
-            <tbody>
-              {rows.slice(0, 200).map((r, i) => (
-                <tr key={i} className="hover:bg-black/[0.02]">
-                  <Td><span className="text-black/60">{fmtTime(r.ts)}</span></Td>
-                  <Td><span style={{ color: secColor(r.event) }}>{r.event}</span></Td>
-                  <Td>{r.user || r.sub || r.by || "—"}</Td>
-                  <Td><span className="text-black/60">{r.tool ? `${r.tool}${r.server ? " · " + r.server : ""}` : (r.server || r.scope || "—")}</span></Td>
-                  <Td right><span className="text-black/30 text-xs font-mono">{(r.result_digest || r.hash || "").slice(0, 10) || "—"}</span></Td>
-                </tr>
-              ))}
-            </tbody>
-          </table></div>
+
+      <CardBox title="Filters">
+        <div className="flex gap-2 flex-wrap items-end">
+          <Field label="Event">
+            <SelectInput value={f.event} onChange={(e) => set("event", e.target.value)}>
+              <option value="">All events</option>
+              {(facets?.events || []).map((t: string) => <option key={t} value={t}>{t}</option>)}
+            </SelectInput>
+          </Field>
+          <Field label="Identity">
+            <SelectInput value={f.user} onChange={(e) => set("user", e.target.value)}>
+              <option value="">Anyone</option>
+              {(facets?.users || []).map((t: string) => <option key={t} value={t}>{t}</option>)}
+            </SelectInput>
+          </Field>
+          <Field label="Server">
+            <SelectInput value={f.server} onChange={(e) => set("server", e.target.value)}>
+              <option value="">Any server</option>
+              {(facets?.servers || []).map((t: string) => <option key={t} value={t}>{t}</option>)}
+            </SelectInput>
+          </Field>
+          <Field label="Tool">
+            <SelectInput value={f.tool} onChange={(e) => set("tool", e.target.value)}>
+              <option value="">Any tool</option>
+              {(facets?.tools || []).map((t: string) => <option key={t} value={t}>{t}</option>)}
+            </SelectInput>
+          </Field>
+          <Field label="From"><TextInput type="datetime-local" value={f.since} onChange={(e) => set("since", e.target.value)} /></Field>
+          <Field label="To"><TextInput type="datetime-local" value={f.until} onChange={(e) => set("until", e.target.value)} /></Field>
+          <Field label="Contains text"><TextInput value={f.text} onChange={(e) => set("text", e.target.value)} placeholder="free text" /></Field>
+          <div className="flex gap-2 ml-auto">
+            {active && <GhostBtn onClick={clear}>Clear</GhostBtn>}
+            <GhostBtn onClick={() => exportAs("csv")}>Export CSV</GhostBtn>
+            <GhostBtn onClick={() => exportAs("json")}>Export JSON</GhostBtn>
+          </div>
+        </div>
+      </CardBox>
+
+      <CardBox title="Security events">
+        {rows.length === 0 ? <Empty label="No events match these filters." /> : (
+          <>
+            <div className="overflow-x-auto"><table className="w-full">
+              <thead><tr><Th>Time</Th><Th>Event</Th><Th>Identity</Th><Th>Target</Th><Th right>Duration</Th><Th right>Digest</Th></tr></thead>
+              <tbody>
+                {rows.map((r, i) => (
+                  <tr key={i} className="hover:bg-black/[0.02]">
+                    <Td><span className="text-black/60" title={fmtDate(r.ts)}>{fmtTime(r.ts)}</span></Td>
+                    <Td><span style={{ color: secColor(r.event) }}>{r.event}</span></Td>
+                    <Td>{r.user || r.sub || r.by || "—"}</Td>
+                    <Td><span className="text-black/60">{r.tool ? `${r.tool}${r.server ? " · " + r.server : ""}` : (r.server || r.scope || "—")}</span></Td>
+                    <Td right><span className="text-black/40">{r.duration_ms != null ? `${Math.round(r.duration_ms)}ms` : "—"}</span></Td>
+                    <Td right><span className="text-black/30 text-xs font-mono">{(r.result_digest || r.hash || "").slice(0, 10) || "—"}</span></Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table></div>
+            <div className="flex items-center justify-between pt-2">
+              <span className="text-xs text-black/40">
+                {offset + 1}–{Math.min(offset + PAGE_SIZE, total)} of {total}
+              </span>
+              <div className="flex gap-2">
+                <GhostBtn onClick={() => setOffset(Math.max(0, offset - PAGE_SIZE))}>← Newer</GhostBtn>
+                <GhostBtn onClick={() => data?.has_more && setOffset(offset + PAGE_SIZE)}>Older →</GhostBtn>
+              </div>
+            </div>
+          </>
         )}
       </CardBox>
     </>
@@ -465,29 +590,55 @@ function RoleModal({ op, roles, clearances, onClose, onSaved }: {
 // ══════════════════════════════════════════════════════════════════════════════
 // 4. REGISTRY — tool governance: onboarding approve, drift re-pin, re-tier
 // ══════════════════════════════════════════════════════════════════════════════
+// Governance you can actually perform (A8/A24): read a tool's schema BEFORE approving it,
+// see exactly what changed when drift quarantines it, REJECT one (previously an admin
+// could only ever say yes), and manually quarantine on suspicion instead of waiting for a
+// hash to drift. Re-tier is a real dialog, not window.prompt().
 export function RegistryPage({ query, onAuthExpired }: { query: string; onAuthExpired: () => void }) {
   const { data, loading, reload } = useApi<{ entries: any[] }>("/api/admin/registry", onAuthExpired);
-  const [tab, setTab] = useState<"all" | "pending" | "quarantined">("all");
+  const [tab, setTab] = useState<"all" | "pending" | "quarantined" | "rejected">("all");
+  const [inspect, setInspect] = useState<any | null>(null);
+  const [diff, setDiff] = useState<any | null>(null);
+  const [retierOn, setRetierOn] = useState<any | null>(null);
+  const [tierVal, setTierVal] = useState(0);
+  const [reasonFor, setReasonFor] = useState<{ e: any; kind: "reject" | "quarantine" } | null>(null);
+  const [reason, setReason] = useState("");
+
   const q = query.toLowerCase();
   const all = data?.entries ?? [];
   const rows = all.filter((e) => (tab === "all" || e.status === tab) &&
     (`${e.server}.${e.tool}`).toLowerCase().includes(q));
-  const counts = { pending: all.filter((e) => e.status === "pending").length, quarantined: all.filter((e) => e.status === "quarantined").length };
+  const counts = {
+    pending: all.filter((e) => e.status === "pending").length,
+    quarantined: all.filter((e) => e.status === "quarantined").length,
+    rejected: all.filter((e) => e.status === "rejected").length,
+  };
+
   const act = async (path: string, label: string, body?: any) => {
-    try { await apiPost(path, body); toast(label); reload(); } catch (e: any) { toast(e.message || "Failed", "err"); }
+    try { await apiPost(path, body); toast(label); reload(); }
+    catch (e: any) { toast(e.message || "Failed", "err"); }
   };
-  const retier = (e: any) => {
-    const v = prompt(`Risk tier for ${e.server}.${e.tool}\n0 read · 1 reversible · 2 human · 3 two-person`, String(e.tier));
-    if (v === null) return;
-    const tier = Number(v);
-    if (![0, 1, 2, 3].includes(tier)) { toast("Tier must be 0–3", "err"); return; }
-    act(`/api/admin/registry/${e.server}/${e.tool}/tier`, "Tier updated", { tier });
+
+  const openDiff = async (e: any) => {
+    try { setDiff(await apiGet(`/api/admin/registry/${e.server}/${e.tool}/diff`)); }
+    catch { toast("No pending drift for this tool", "err"); }
   };
+
+  const submitReason = async () => {
+    if (!reasonFor) return;
+    if (reason.trim().length < 3) { toast("A reason is required", "err"); return; }
+    const { e, kind } = reasonFor;
+    await act(`/api/admin/registry/${e.server}/${e.tool}/${kind}`,
+      kind === "reject" ? "Tool rejected — it cannot be called and will not resurrect"
+                        : "Tool quarantined", { reason: reason.trim() });
+    setReasonFor(null); setReason("");
+  };
+
   return (
     <>
       <Head title="Tool registry" count={loading ? "…" : `${all.length} tools`} />
       <div className="flex gap-2">
-        {(["all", "pending", "quarantined"] as const).map((t) => (
+        {(["all", "pending", "quarantined", "rejected"] as const).map((t) => (
           <button key={t} onClick={() => setTab(t)} className={`text-xs px-3 py-1 rounded-lg border ${tab === t ? "border-black/20 bg-black/[0.04]" : "border-black/10 hover:bg-black/[0.03]"}`}>
             {t[0].toUpperCase() + t.slice(1)}{t !== "all" && (counts as any)[t] ? ` (${(counts as any)[t]})` : ""}
           </button>
@@ -500,14 +651,42 @@ export function RegistryPage({ query, onAuthExpired }: { query: string; onAuthEx
             <tbody>
               {rows.slice(0, 300).map((e) => (
                 <tr key={e.server + e.tool} className="hover:bg-black/[0.02]">
-                  <Td><span className="font-medium">{e.server}.{e.tool}</span>{e.quarantine_reason && <div className="text-xs" style={{ color: "#D9534F" }}>{e.quarantine_reason}</div>}</Td>
-                  <Td><div className="flex items-center gap-2"><TierPill tier={e.tier} /><button onClick={() => retier(e)} className="text-xs text-black/40 hover:text-black underline">re-tier</button></div></Td>
+                  <Td>
+                    <button onClick={() => setInspect(e)} className="font-medium hover:underline text-left">
+                      {e.server}.{e.tool}
+                    </button>
+                    {e.quarantine_reason && <div className="text-xs" style={{ color: "#D9534F" }}>{e.quarantine_reason}</div>}
+                  </Td>
+                  <Td>
+                    <div className="flex items-center gap-2">
+                      <TierPill tier={e.tier} />
+                      <button onClick={() => { setRetierOn(e); setTierVal(e.tier); }}
+                        className="text-xs text-black/40 hover:text-black underline">re-tier</button>
+                    </div>
+                  </Td>
                   <Td><StatusPill status={e.status} /></Td>
                   <Td><span className="text-black/30 text-xs font-mono">{(e.fingerprint || "").slice(0, 6)}…{(e.fingerprint || "").slice(-4)}</span></Td>
                   <Td right>
-                    {e.status === "pending" ? <button onClick={() => act(`/api/admin/registry/${e.server}/${e.tool}/approve`, "Tool onboarded")} className="text-xs px-3 py-1 rounded-lg text-white bg-[#1C1C1C] hover:opacity-80">Approve onboarding</button>
-                      : e.status === "quarantined" ? <button onClick={() => act(`/api/admin/registry/${e.server}/${e.tool}/approve_drift`, "Drift accepted & re-pinned")} className="text-xs px-3 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04]">Review drift · re-pin</button>
-                        : <span className="text-black/20">—</span>}
+                    <div className="flex gap-2 justify-end flex-wrap">
+                      <GhostBtn onClick={() => setInspect(e)}>Inspect</GhostBtn>
+                      {e.status === "pending" && (
+                        <>
+                          <GhostBtn danger onClick={() => { setReasonFor({ e, kind: "reject" }); setReason(""); }}>Reject</GhostBtn>
+                          <PrimaryBtn onClick={() => act(`/api/admin/registry/${e.server}/${e.tool}/approve`, "Tool onboarded")}>Approve</PrimaryBtn>
+                        </>
+                      )}
+                      {e.status === "quarantined" && (
+                        e.has_drift
+                          ? <PrimaryBtn onClick={() => openDiff(e)}>Review drift</PrimaryBtn>
+                          : <GhostBtn onClick={() => act(`/api/admin/registry/${e.server}/${e.tool}/unquarantine`, "Quarantine released")}>Release</GhostBtn>
+                      )}
+                      {e.status === "active" && (
+                        <GhostBtn danger onClick={() => { setReasonFor({ e, kind: "quarantine" }); setReason(""); }}>Quarantine</GhostBtn>
+                      )}
+                      {e.status === "rejected" && (
+                        <GhostBtn onClick={() => act(`/api/admin/registry/${e.server}/${e.tool}/reinstate`, "Back to pending")}>Reinstate</GhostBtn>
+                      )}
+                    </div>
                   </Td>
                 </tr>
               ))}
@@ -515,6 +694,111 @@ export function RegistryPage({ query, onAuthExpired }: { query: string; onAuthEx
           </table></div>
         )}
       </CardBox>
+
+      {/* Read the tool before you approve it — approving a hash you cannot inspect is not governance. */}
+      {inspect && (
+        <Modal title={`${inspect.server}.${inspect.tool}`} onClose={() => setInspect(null)} width={620}>
+          <div className="flex items-center gap-2">
+            <TierPill tier={inspect.tier} /><StatusPill status={inspect.status} />
+            <span className="text-xs text-black/30 font-mono ml-auto">{inspect.fingerprint}</span>
+          </div>
+          <Field label="Description">
+            <div className="text-sm text-black/70 bg-black/[0.03] rounded-lg p-3">
+              {inspect.description || <span className="text-black/30">(none)</span>}
+            </div>
+          </Field>
+          <Field label="Input schema (what the model may send)">
+            <pre className="text-xs bg-black/[0.03] rounded-lg p-3 overflow-auto max-h-[40vh] font-mono">
+              {JSON.stringify(inspect.schema || {}, null, 2)}
+            </pre>
+          </Field>
+          {inspect.status === "pending" && (
+            <div className="flex gap-2 justify-end">
+              <GhostBtn danger onClick={() => { setReasonFor({ e: inspect, kind: "reject" }); setReason(""); setInspect(null); }}>Reject</GhostBtn>
+              <PrimaryBtn onClick={() => { act(`/api/admin/registry/${inspect.server}/${inspect.tool}/approve`, "Tool onboarded"); setInspect(null); }}>
+                Approve onboarding
+              </PrimaryBtn>
+            </div>
+          )}
+        </Modal>
+      )}
+
+      {/* What actually CHANGED — re-pinning a hash you haven't read is rubber-stamping. */}
+      {diff && (
+        <Modal title={`Definition drift · ${diff.server}.${diff.tool}`} onClose={() => setDiff(null)} width={720}>
+          <div className="rounded-xl p-3 text-xs leading-5" style={{ background: "#fdf3e0", color: "#8a6100" }}>
+            This tool's definition changed after it was pinned. A rug-pull looks exactly like
+            this. Read the diff — a new parameter or a rewritten description can turn a safe
+            tool into an exfiltration path.
+          </div>
+          <div className="text-xs text-black/50">Changed: {diff.changed_fields.join(", ") || "nothing"}</div>
+          <div className="flex gap-3">
+            <div className="flex-1 min-w-0">
+              <span className="text-xs text-black/50">Pinned (trusted)</span>
+              <pre className="text-xs bg-black/[0.03] rounded-lg p-3 overflow-auto max-h-[40vh] font-mono mt-1">
+                {JSON.stringify(diff.old, null, 2)}
+              </pre>
+            </div>
+            <div className="flex-1 min-w-0">
+              <span className="text-xs" style={{ color: "#B03A36" }}>Proposed (new)</span>
+              <pre className="text-xs rounded-lg p-3 overflow-auto max-h-[40vh] font-mono mt-1" style={{ background: "#fdeaea" }}>
+                {JSON.stringify(diff.new, null, 2)}
+              </pre>
+            </div>
+          </div>
+          <div className="flex gap-2 justify-end">
+            <GhostBtn onClick={() => setDiff(null)}>Leave quarantined</GhostBtn>
+            <GhostBtn danger onClick={() => { setReasonFor({ e: diff, kind: "reject" }); setReason(""); setDiff(null); }}>Reject tool</GhostBtn>
+            <PrimaryBtn onClick={() => { act(`/api/admin/registry/${diff.server}/${diff.tool}/approve_drift`, "Drift accepted & re-pinned"); setDiff(null); }}>
+              Accept & re-pin
+            </PrimaryBtn>
+          </div>
+        </Modal>
+      )}
+
+      {retierOn && (
+        <Modal title={`Risk tier · ${retierOn.server}.${retierOn.tool}`} onClose={() => setRetierOn(null)}>
+          <Field label="Tier">
+            <SelectInput value={tierVal} onChange={(e) => setTierVal(Number(e.target.value))}>
+              <option value={0}>0 — read only</option>
+              <option value={1}>1 — reversible write</option>
+              <option value={2}>2 — human approval</option>
+              <option value={3}>3 — two-person approval</option>
+            </SelectInput>
+          </Field>
+          <p className="text-xs text-black/40">
+            The tier decides whether a call runs, pauses for one approver, or needs two.
+          </p>
+          <div className="flex gap-2 justify-end">
+            <GhostBtn onClick={() => setRetierOn(null)}>Cancel</GhostBtn>
+            <PrimaryBtn onClick={() => { act(`/api/admin/registry/${retierOn.server}/${retierOn.tool}/tier`, "Tier updated", { tier: tierVal }); setRetierOn(null); }}>
+              Save tier
+            </PrimaryBtn>
+          </div>
+        </Modal>
+      )}
+
+      {reasonFor && (
+        <Modal title={reasonFor.kind === "reject"
+          ? `Reject ${reasonFor.e.server}.${reasonFor.e.tool}?`
+          : `Quarantine ${reasonFor.e.server}.${reasonFor.e.tool}?`} onClose={() => setReasonFor(null)}>
+          <p className="text-xs text-black/60 leading-5">
+            {reasonFor.kind === "reject"
+              ? "The tool stays known but permanently inactive, and re-discovery will not resurrect it. You can reinstate it later."
+              : "The tool stops being callable immediately. Use this when you suspect a tool but its hash has not drifted."}
+          </p>
+          <Field label="Reason (recorded in the audit chain)">
+            <TextInput value={reason} onChange={(e) => setReason(e.target.value)}
+              placeholder="e.g. exposes bulk export; not approved for this deployment" />
+          </Field>
+          <div className="flex gap-2 justify-end">
+            <GhostBtn onClick={() => setReasonFor(null)}>Cancel</GhostBtn>
+            <PrimaryBtn danger onClick={submitReason}>
+              {reasonFor.kind === "reject" ? "Reject tool" : "Quarantine tool"}
+            </PrimaryBtn>
+          </div>
+        </Modal>
+      )}
     </>
   );
 }
@@ -522,53 +806,143 @@ export function RegistryPage({ query, onAuthExpired }: { query: string; onAuthEx
 // ══════════════════════════════════════════════════════════════════════════════
 // 5. KILL SWITCH — scoped containment (global / server / tool / user)
 // ══════════════════════════════════════════════════════════════════════════════
+// The most powerful button in the product. Until Phase 2 it was a free-text box and a
+// one-click "Global kill" with no confirmation, no reason, and no way to un-forget it:
+// a typo silently protected nothing, and a global kill left no trace of WHY 300 people
+// were cut off. Now: scope pickers, a mandatory reason, an optional auto-release, and a
+// confirmation that states the blast radius (A7).
+function scopeBlastRadius(scope: string): string {
+  if (scope === "global") return "EVERY user and EVERY tool on the gateway — all 300+ staff.";
+  if (scope.startsWith("server:")) return `every tool on the ${scope.slice(7)} server, for all users.`;
+  if (scope.startsWith("tool:")) return `one tool (${scope.slice(5)}), for all users.`;
+  if (scope.startsWith("user:")) return `every tool call by ${scope.slice(5)}.`;
+  return "the selected scope.";
+}
+
 export function KillSwitchPage({ onAuthExpired }: { onAuthExpired: () => void }) {
-  const ks = useApi<{ active: string[] }>("/api/admin/killswitch", onAuthExpired);
-  const srv = useApi<{ servers: any[] }>("/api/admin/servers", onAuthExpired);
-  const [scope, setScope] = useState("");
-  const active = ks.data?.active ?? [];
-  const engage = async (s: string) => {
-    if (!s) return;
-    try { await apiPost("/api/admin/killswitch/engage", { scope: s }); toast(`Engaged: ${s}`); setScope(""); ks.reload(); }
-    catch (e: any) { toast(e.message || "Failed", "err"); }
+  const ks = useApi<{ active: string[]; details: any[]; scopes: any }>("/api/admin/killswitch", onAuthExpired);
+  const [kind, setKind] = useState<"global" | "server" | "tool" | "user">("server");
+  const [target, setTarget] = useState("");
+  const [reason, setReason] = useState("");
+  const [ttl, setTtl] = useState("");
+  const [confirm, setConfirm] = useState<string | null>(null);
+
+  const details = ks.data?.details ?? [];
+  const opts = ks.data?.scopes ?? { servers: [], tools: [], users: [] };
+  const scope = kind === "global" ? "global" : target ? `${kind}:${target}` : "";
+
+  const doEngage = async () => {
+    setConfirm(null);
+    try {
+      await apiPost("/api/admin/killswitch/engage", {
+        scope, reason: reason.trim(), ttl_minutes: ttl ? Number(ttl) : null,
+      });
+      toast(`Engaged: ${scope}`);
+      setTarget(""); setReason(""); setTtl("");
+      ks.reload();
+    } catch (e: any) { toast(e.message || "Failed", "err"); }
   };
+
+  const askEngage = () => {
+    if (!scope) { toast("Pick a scope first", "err"); return; }
+    if (reason.trim().length < 3) { toast("A reason is required — containment must say why", "err"); return; }
+    setConfirm(scope);
+  };
+
   const release = async (s: string) => {
     try { await apiPost("/api/admin/killswitch/release", { scope: s }); toast(`Released: ${s}`); ks.reload(); }
     catch (e: any) { toast(e.message || "Failed", "err"); }
   };
+
+  const targets = kind === "server" ? opts.servers : kind === "tool" ? opts.tools : opts.users;
+
   return (
     <>
-      <Head title="Kill switch" count={`${active.length} active`} />
-      <div className="rounded-[20px] p-4 flex items-center gap-3" style={{ background: active.length ? "#fbe6e6" : "#e3f5e5" }}>
-        <ShieldAlert size={18} style={{ color: active.length ? "#D9534F" : "#4AA785" }} />
-        <span className="text-sm font-semibold text-black">{active.length ? `Containment engaged — ${active.length} scope(s) blocking calls` : "No containment active — all traffic flowing"}</span>
+      <Head title="Kill switch" count={`${details.length} active`} />
+      <div className="rounded-[20px] p-4 flex items-center gap-3" style={{ background: details.length ? "#fbe6e6" : "#e3f5e5" }}>
+        <ShieldAlert size={18} style={{ color: details.length ? "#D9534F" : "#4AA785" }} />
+        <span className="text-sm font-semibold text-black">
+          {details.length ? `Containment engaged — ${details.length} scope(s) blocking calls`
+                          : "No containment active — all traffic flowing"}
+        </span>
       </div>
+
       <CardBox title="Engage containment">
-        <div className="flex items-center gap-2 flex-wrap">
-          <input value={scope} onChange={(e) => setScope(e.target.value)} placeholder="scope e.g. tool:postgres:drop_table or user:sara"
-            className="flex-1 min-w-[240px] bg-white border border-black/10 rounded-lg px-3 py-2 text-sm outline-none focus:border-black/30" />
-          <button onClick={() => engage(scope)} className="text-xs px-4 py-2 rounded-lg text-white bg-[#1C1C1C] hover:opacity-80 flex items-center gap-1"><Ban size={13} /> Engage</button>
+        <div className="flex gap-2 flex-wrap items-end">
+          <Field label="Scope type">
+            <SelectInput value={kind} onChange={(e) => { setKind(e.target.value as any); setTarget(""); }}>
+              <option value="server">Server</option>
+              <option value="tool">Tool</option>
+              <option value="user">User</option>
+              <option value="global">Global (everything)</option>
+            </SelectInput>
+          </Field>
+          {kind !== "global" && (
+            <Field label={`Which ${kind}?`}>
+              <SelectInput value={target} onChange={(e) => setTarget(e.target.value)}>
+                <option value="">Select…</option>
+                {(targets || []).map((t: string) => <option key={t} value={t}>{t}</option>)}
+              </SelectInput>
+            </Field>
+          )}
+          <Field label="Auto-release after (minutes, optional)">
+            <TextInput type="number" min={1} max={10080} value={ttl} placeholder="never"
+              onChange={(e) => setTtl(e.target.value)} />
+          </Field>
         </div>
-        <div className="flex gap-2 flex-wrap">
-          <button onClick={() => engage("global")} className="text-xs px-3 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04]" style={{ color: "#D9534F" }}>⨯ Global kill</button>
-          {(srv.data?.servers || []).map((s) => (
-            <button key={s.name} onClick={() => engage(`server:${s.name}`)} className="text-xs px-3 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04]">Kill server:{s.name}</button>
-          ))}
+        <Field label="Reason (required — recorded in the audit chain)">
+          <TextInput value={reason} onChange={(e) => setReason(e.target.value)}
+            placeholder="e.g. suspected rug-pull on gitea; contained pending review" />
+        </Field>
+        <div className="flex items-center justify-between">
+          <span className="text-xs text-black/40">
+            {scope ? <>Will block: <b className="text-black/60">{scopeBlastRadius(scope)}</b></>
+                   : "Pick a scope to see the blast radius."}
+          </span>
+          <PrimaryBtn danger onClick={askEngage}>
+            <span className="flex items-center gap-1"><Ban size={13} /> Engage containment</span>
+          </PrimaryBtn>
         </div>
       </CardBox>
+
       <CardBox title="Active scopes">
-        {active.length === 0 ? <Empty label="Nothing contained." /> : (
+        {details.length === 0 ? <Empty label="Nothing contained." /> : (
           <div className="flex flex-col gap-2">
-            {active.map((s) => (
-              <div key={s} className="flex items-center gap-3 py-2 border-t border-black/5 first:border-t-0">
-                <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: "#fbe6e6", color: "#D9534F" }}>blocked</span>
-                <span className="text-sm font-mono">{s}</span>
-                <button onClick={() => release(s)} className="ml-auto text-xs px-3 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04]">Release</button>
+            {details.map((d) => (
+              <div key={d.scope} className="flex items-start gap-3 py-3 border-t border-black/5 first:border-t-0">
+                <span className="text-xs px-2 py-0.5 rounded-full shrink-0" style={{ background: "#fbe6e6", color: "#D9534F" }}>blocked</span>
+                <div className="flex flex-col min-w-0 flex-1">
+                  <span className="text-sm font-mono">{d.scope}</span>
+                  <span className="text-xs text-black/50">
+                    {d.reason || "(no reason recorded)"} — by {d.by || "?"}
+                    {d.ts ? ` · ${new Date(d.ts * 1000).toLocaleString()}` : ""}
+                  </span>
+                  {d.expires && (
+                    <span className="text-xs" style={{ color: "#8a6100" }}>
+                      auto-releases {new Date(d.expires * 1000).toLocaleString()}
+                    </span>
+                  )}
+                </div>
+                <button onClick={() => release(d.scope)} className="text-xs px-3 py-1 rounded-lg border border-black/10 hover:bg-black/[0.04] shrink-0">Release</button>
               </div>
             ))}
           </div>
         )}
       </CardBox>
+
+      {confirm && (
+        <ConfirmModal
+          title={confirm === "global" ? "Engage a GLOBAL kill switch?" : `Contain ${confirm}?`}
+          body={<>
+            This immediately blocks <b>{scopeBlastRadius(confirm)}</b>
+            <br /><br />Reason: <i>{reason}</i>
+            {ttl ? <><br />Auto-releases after {ttl} minute(s).</>
+                 : <><br /><b>No auto-release</b> — it stays until an admin releases it.</>}
+          </>}
+          confirmLabel="Engage containment"
+          onCancel={() => setConfirm(null)}
+          onConfirm={doEngage} />
+      )}
     </>
   );
 }

@@ -6,11 +6,12 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
-                               RedirectResponse, Response)
+                               PlainTextResponse, RedirectResponse, Response)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import apikeys, audit, auth, devclient, mcp_server, notifications, oauth
+from . import (apikeys, audit, auth, devclient, insights, mcp_server, notifications,
+               oauth, selfinfo, settings as gwsettings)
 from .auth import USERS, verify
 from .config import CONFIG, POLICY, ROOT
 from .controls import RateLimiter, kill_switch
@@ -216,10 +217,34 @@ class MfaReq(BaseModel):
 
 class KillReq(BaseModel):
     scope: str
+    reason: str = ""              # required on engage — containment must say why
+    ttl_minutes: int | None = None   # auto-release, so a kill can't be forgotten
 
 
 class TierReq(BaseModel):
     tier: int                # 0 read | 1 reversible write | 2 human | 3 two-person
+
+
+class ReasonReq(BaseModel):
+    reason: str = ""
+
+
+class SettingsReq(BaseModel):
+    section: str
+    patch: dict
+
+
+class MaintenanceReq(BaseModel):
+    enabled: bool
+    message: str = ""
+
+
+class EditServerReq(BaseModel):
+    command: str | None = None
+    args: list[str] = []
+    transport: str = "stdio"
+    url: str | None = None
+    env: dict[str, str] = {}
 
 
 class ChangePwReq(BaseModel):
@@ -824,21 +849,57 @@ def approvals_history(limit: int = 200, claims: dict = Depends(current_user)):
 # ---------- admin: kill switch, audit, registry ----------
 @app.get("/api/admin/killswitch")
 def killswitch_status(claims: dict = Depends(require_admin)):
-    return {"active": kill_switch.active()}
+    return {"active": kill_switch.active(), "details": kill_switch.details(),
+            "scopes": _killswitch_scope_options()}
+
+
+def _killswitch_scope_options() -> dict:
+    """The scopes an admin can contain, so the console offers pickers instead of a
+    free-text box where a typo silently protects nothing (A7)."""
+    servers = sorted(gw.mcp.servers)
+    tools = sorted({f"{t['server']}:{t['name']}" for t in gw.mcp.all_tools()})
+    return {"servers": servers, "tools": tools, "users": sorted(USERS)}
 
 
 @app.post("/api/admin/killswitch/engage")
 def killswitch_engage(req: KillReq, claims: dict = Depends(require_admin)):
-    kill_switch.engage(req.scope)
-    audit.record("killswitch_engage", scope=req.scope, by=claims["sub"])
-    return {"active": kill_switch.active()}
+    """Engage containment. A reason is REQUIRED (the most powerful button in the product
+    must leave a trail), and an optional TTL auto-releases it so a forgotten global kill
+    cannot strand the organization indefinitely."""
+    scope = (req.scope or "").strip()
+    if not _valid_kill_scope(scope):
+        raise HTTPException(400, "scope must be 'global', 'server:<name>', "
+                                 "'tool:<server>:<tool>' or 'user:<sub>'")
+    reason = (req.reason or "").strip()
+    if len(reason) < 3:
+        raise HTTPException(400, "a reason is required (min 3 characters)")
+    ttl = req.ttl_minutes
+    if ttl is not None and not (1 <= int(ttl) <= 10080):
+        raise HTTPException(400, "ttl_minutes must be between 1 and 10080 (7 days)")
+    kill_switch.engage(scope, by=claims["sub"], reason=reason,
+                       ttl_minutes=int(ttl) if ttl else None)
+    audit.record("killswitch_engage", scope=scope, by=claims["sub"], reason=reason,
+                 ttl_minutes=ttl)
+    return {"active": kill_switch.active(), "details": kill_switch.details()}
+
+
+def _valid_kill_scope(scope: str) -> bool:
+    if scope == "global":
+        return True
+    if scope.startswith("server:") and len(scope) > 7:
+        return True
+    if scope.startswith("user:") and len(scope) > 5:
+        return True
+    if scope.startswith("tool:") and scope.count(":") >= 2:
+        return True
+    return False
 
 
 @app.post("/api/admin/killswitch/release")
 def killswitch_release(req: KillReq, claims: dict = Depends(require_admin)):
     kill_switch.release(req.scope)
     audit.record("killswitch_release", scope=req.scope, by=claims["sub"])
-    return {"active": kill_switch.active()}
+    return {"active": kill_switch.active(), "details": kill_switch.details()}
 
 
 @app.get("/api/admin/revocations")
@@ -876,14 +937,129 @@ def unlock_identity(req: RevokeReq, claims: dict = Depends(require_admin)):
 
 
 @app.get("/api/admin/audit")
-def audit_tail(claims: dict = Depends(require_admin)):
+def audit_tail(event: str = "", user: str = "", server: str = "", tool: str = "",
+               text: str = "", since: float | None = None, until: float | None = None,
+               limit: int = 200, offset: int = 0,
+               claims: dict = Depends(require_admin)):
+    """Filtered, paginated audit search (A2). With no filters this is the old tail, so
+    existing callers are unaffected; with filters it answers 'what did khalid touch last
+    Tuesday' without SSH-ing in to grep a 2 MB JSONL file."""
+    ok, msg = audit.chain_status()      # the "Re-verify" button forces a fresh full pass
+    page = insights.query(event=event, user=user, server=server, tool=tool, text=text,
+                          since=since, until=until, limit=limit, offset=offset)
+    return {"chain_ok": ok, "chain_status": msg, **page}
+
+
+@app.get("/api/admin/audit/verify")
+def audit_verify(claims: dict = Depends(require_admin)):
+    """Force a FULL re-verification of the hash chain (the console's Re-verify button).
+    Deliberately not cached: this is the tamper-evidence check, and an operator asking for
+    it must get a fresh answer, however long the log is."""
     ok, msg = audit.verify_chain()
-    return {"chain_ok": ok, "chain_status": msg, "records": audit.tail(200)}
+    audit._verify_cache.update({"ts": time.time(), "result": (ok, msg)})
+    audit.record("audit_chain_verified", by=claims["sub"], ok=ok, detail=msg)
+    return {"chain_ok": ok, "chain_status": msg}
+
+
+@app.get("/api/admin/audit/facets")
+def audit_facets(claims: dict = Depends(require_admin)):
+    """Distinct events/users/servers/tools — the filter dropdowns."""
+    return insights.facets()
+
+
+@app.get("/api/admin/audit/export")
+def audit_export(fmt: str = "csv", event: str = "", user: str = "", server: str = "",
+                 tool: str = "", text: str = "", since: float | None = None,
+                 until: float | None = None, limit: int = 10000,
+                 claims: dict = Depends(require_admin)):
+    """Export the current audit view (CSV or JSON) for an investigation or an auditor."""
+    page = insights.query(event=event, user=user, server=server, tool=tool, text=text,
+                          since=since, until=until, limit=min(int(limit), 10000), offset=0)
+    audit.record("audit_exported", by=claims["sub"], count=len(page["records"]), format=fmt,
+                 filters={k: v for k, v in
+                          {"event": event, "user": user, "server": server, "tool": tool,
+                           "text": text}.items() if v})
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    if fmt == "json":
+        return JSONResponse(
+            page["records"],
+            headers={"Content-Disposition": f'attachment; filename="audit-{stamp}.json"'})
+    return PlainTextResponse(
+        insights.export_csv(page["records"]), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="audit-{stamp}.csv"'})
 
 
 @app.get("/api/admin/registry")
 def registry(claims: dict = Depends(require_admin)):
-    return {"entries": list(gw.registry.entries.values())}
+    """Registry entries, each carrying the live tool schema so an admin can READ a tool
+    before approving it — approving a hash you cannot inspect is not governance (A8)."""
+    entries = []
+    for e in gw.registry.entries.values():
+        live = gw.mcp.find_tool(e["server"], e["tool"])
+        definition = e.get("definition") or {}
+        entries.append({
+            **e,
+            "description": (live or {}).get("description") or definition.get("description", ""),
+            "schema": (live or {}).get("schema") or definition.get("schema", {}),
+            "has_drift": bool(e.get("pending_fingerprint")),
+        })
+    return {"entries": entries}
+
+
+@app.get("/api/admin/registry/{server}/{tool}/diff")
+def registry_diff(server: str, tool: str, claims: dict = Depends(require_admin)):
+    """What actually CHANGED in a drift-quarantined tool — pinned vs pending definition.
+    Re-pinning a hash without seeing the diff is rubber-stamping (A24)."""
+    diff = gw.registry.drift_diff(server, tool)
+    if not diff:
+        raise HTTPException(404, "no pending drift for this tool")
+    return diff
+
+
+@app.post("/api/admin/registry/{server}/{tool}/reject")
+def reject_tool(server: str, tool: str, req: ReasonReq,
+                claims: dict = Depends(require_admin)):
+    """Risk-Board REJECTION: the tool stays known, permanently inactive, and discovery
+    will not resurrect it. Until now an admin could only ever say yes (A8)."""
+    if not gw.registry.reject(server, tool, req.reason):
+        raise HTTPException(404, "unknown tool")
+    audit.record("tool_rejected", server=server, tool=tool, by=claims["sub"],
+                 reason=req.reason)
+    return {"entry": gw.registry.get(server, tool)}
+
+
+@app.post("/api/admin/registry/{server}/{tool}/reinstate")
+def reinstate_tool(server: str, tool: str, claims: dict = Depends(require_admin)):
+    """Undo a rejection — the tool returns to `pending` for a fresh decision."""
+    if not gw.registry.reinstate(server, tool):
+        raise HTTPException(400, "tool is not rejected")
+    audit.record("tool_reinstated", server=server, tool=tool, by=claims["sub"])
+    return {"entry": gw.registry.get(server, tool)}
+
+
+@app.post("/api/admin/registry/{server}/{tool}/quarantine")
+def quarantine_tool(server: str, tool: str, req: ReasonReq,
+                    claims: dict = Depends(require_admin)):
+    """Manually contain ONE tool on suspicion — narrower than a kill switch, and durable.
+    Previously an admin could only wait for hash drift to quarantine something (A8)."""
+    reason = (req.reason or "").strip()
+    if len(reason) < 3:
+        raise HTTPException(400, "a reason is required (min 3 characters)")
+    if not gw.registry.quarantine(server, tool, reason):
+        raise HTTPException(404, "unknown tool")
+    audit.record("tool_quarantined", server=server, tool=tool, by=claims["sub"], reason=reason)
+    return {"entry": gw.registry.get(server, tool)}
+
+
+@app.post("/api/admin/registry/{server}/{tool}/unquarantine")
+def unquarantine_tool(server: str, tool: str, claims: dict = Depends(require_admin)):
+    """Release a MANUAL quarantine. A drift quarantine must go through approve_drift
+    (re-pin the hash) so a definition change can never be waved through by accident."""
+    if not gw.registry.unquarantine(server, tool):
+        raise HTTPException(400, "tool is not manually quarantined "
+                                 "(drift quarantines are released by re-pinning)")
+    audit.record("tool_unquarantined", server=server, tool=tool, by=claims["sub"])
+    return {"entry": gw.registry.get(server, tool)}
 
 
 @app.post("/api/admin/registry/{server}/{tool}/approve_drift")
@@ -1198,29 +1374,171 @@ async def server_remove(name: str, claims: dict = Depends(require_admin)):
     return {"removed": name}
 
 
+@app.get("/api/admin/servers/{name}/spec")
+def server_spec(name: str, claims: dict = Depends(require_admin)):
+    """The spec a server is running with — what the edit form loads (env values redacted)."""
+    _server_or_404(name)
+    return gw.mcp.server_spec(name)
+
+
+@app.post("/api/admin/servers/{name}/edit")
+async def server_edit(name: str, req: EditServerReq, claims: dict = Depends(require_admin)):
+    """Change a server's command/args/env/transport in place (A16). Previously the only
+    way to fix a typo'd env var was remove + re-add, which dropped every pinned hash for
+    that server and forced all its tools back through onboarding. The registry survives
+    an edit — and re-checks definitions, so genuinely changed tools still quarantine."""
+    _server_or_404(name)
+    if req.transport not in ("stdio", "http"):
+        raise HTTPException(400, "transport must be stdio or http")
+    if req.transport == "stdio" and not req.command:
+        raise HTTPException(400, "stdio servers need a command")
+    if req.transport == "http" and not req.url:
+        raise HTTPException(400, "http servers need a url")
+    spec = {"command": req.command, "args": req.args, "transport": req.transport,
+            "env": req.env}
+    if req.url:
+        spec["url"] = req.url
+    try:
+        srv = await gw.mcp.edit_server(name, spec)
+    except Exception as e:
+        raise HTTPException(502, f"edit failed, server left running on the old spec: {e}")
+    events = gw.registry.reconcile(gw.mcp.all_tools())
+    for e in events:
+        audit.record("registry_event", **e)
+    audit.record("server_edited", server=name, by=claims["sub"], transport=req.transport,
+                 tools=len(srv.tools))
+    return {"server": name, "state": srv.state, "tools": len(srv.tools),
+            "drift_quarantined": len([e for e in events if e["type"] == "drift_quarantine"])}
+
+
 # ---------- admin: notification center (the dashboard right panel) ----------
 @app.get("/api/admin/notifications")
 def notifications_list(limit: int = 100, claims: dict = Depends(require_admin)):
-    return {"notifications": notifications.list_all(limit),
-            "unread": notifications.unread_count()}
+    """Read/unread state is per operator (A22): one admin clearing the bell must not
+    hide an incident from the rest of a 2–4 person team."""
+    sub = claims["sub"]
+    return {"notifications": notifications.list_all(limit, sub=sub),
+            "unread": notifications.unread_count(sub)}
 
 
 @app.post("/api/admin/notifications/read")
 def notifications_read(req: NotifReadReq, claims: dict = Depends(require_admin)):
-    changed = notifications.mark_read(req.ids, mark_all=req.all)
-    return {"marked_read": changed, "unread": notifications.unread_count()}
+    sub = claims["sub"]
+    changed = notifications.mark_read(req.ids, mark_all=req.all, sub=sub)
+    return {"marked_read": changed, "unread": notifications.unread_count(sub)}
 
 
 @app.post("/api/admin/notifications/clear")
 def notifications_clear(claims: dict = Depends(require_admin)):
-    return {"cleared": notifications.clear_read(),
-            "unread": notifications.unread_count()}
+    sub = claims["sub"]
+    return {"cleared": notifications.clear_read(sub), "unread": notifications.unread_count(sub)}
 
 
 @app.get("/api/admin/vault")
 def vault_leases(claims: dict = Depends(require_admin)):
     from .vault import vault
     return {"active_leases": vault.active_leases()}
+
+
+# ---------- admin: runtime settings (the console's write side) ----------
+@app.get("/api/admin/settings")
+def settings_get(claims: dict = Depends(require_admin)):
+    """Effective settings + which of them an admin has overridden. Rate limits, approval
+    tier, DLP detectors, anomaly thresholds, alert rules and session policy are all
+    editable here — no SSH, no file edit, no restart (A6/A15/A3)."""
+    return {"effective": gwsettings.effective(), "overrides": gwsettings.overrides(),
+            "alert_rules": list(gwsettings.ALERT_RULES),
+            "servers": sorted(gw.mcp.servers)}
+
+
+@app.post("/api/admin/settings")
+def settings_update(req: SettingsReq, claims: dict = Depends(require_admin)):
+    try:
+        section = gwsettings.update(req.section, req.patch)
+    except gwsettings.SettingsError as e:
+        raise HTTPException(400, str(e))
+    audit.record("settings_changed", by=claims["sub"], section=req.section, patch=req.patch)
+    return {"section": req.section, "effective": section}
+
+
+@app.post("/api/admin/settings/reset")
+def settings_reset(section: str = "", claims: dict = Depends(require_admin)):
+    """Drop overrides and fall back to the config.yaml baseline."""
+    try:
+        eff = gwsettings.reset(section or None)
+    except gwsettings.SettingsError as e:
+        raise HTTPException(400, str(e))
+    audit.record("settings_reset", by=claims["sub"], section=section or "all")
+    return {"effective": eff, "overrides": gwsettings.overrides()}
+
+
+# ---------- admin: the gateway's own page (it finally monitors itself) ----------
+@app.get("/api/admin/gateway")
+def gateway_self(claims: dict = Depends(require_admin)):
+    """Version, uptime, effective config, backup status, certificate expiry, disk growth
+    (A10/A11/A13/A23) — the gateway watched everything except itself."""
+    return selfinfo.overview(gw)
+
+
+@app.post("/api/admin/gateway/maintenance")
+def gateway_maintenance(req: MaintenanceReq, claims: dict = Depends(require_admin)):
+    """Pause mediated tool calls during a patch/migration. Admins keep working (they are
+    the ones fixing it) and the console stays up — unlike a global kill switch."""
+    state = selfinfo.set_maintenance(req.enabled, by=claims["sub"], message=req.message)
+    audit.record("maintenance_mode", by=claims["sub"], enabled=req.enabled,
+                 message=req.message)
+    return state
+
+
+# ---------- admin: real numbers (what the console used to fabricate) ----------
+@app.get("/api/admin/series")
+def traffic_series(hours: int = 24, buckets: int = 24,
+                   claims: dict = Depends(require_admin)):
+    """Real traffic + latency time-series from the audit chain (A19/A5). The Overview
+    charts were synthetic because nobody had ever computed this."""
+    return insights.series(hours=hours, buckets=buckets)
+
+
+@app.get("/api/admin/stats")
+def call_stats(claims: dict = Depends(require_admin)):
+    """Per-tool and per-server call counts, success rate, and p50/p95 latency (A5/A16)."""
+    return {"tools": insights.tool_stats(), "servers": insights.server_stats()}
+
+
+@app.get("/api/admin/ratelimits")
+def rate_limit_usage(claims: dict = Depends(require_admin)):
+    """LIVE rate-limit consumption (A9). The console's usage bars were hardcoded to 0,
+    so an admin could not see who was near a limit or being throttled."""
+    from .controls import rate_limiter, server_limiter, tool_limiter
+    eff = gwsettings.get("rate_limits")
+    return {
+        "limits": eff,
+        "per_user": rate_limiter.snapshot(),
+        "per_tool": tool_limiter.snapshot(),
+        "per_server": server_limiter.snapshot(),
+        "window_seconds": 60,
+    }
+
+
+@app.get("/api/admin/dlp")
+def dlp_activity(hours: int = 168, claims: dict = Depends(require_admin)):
+    """Where PII is actually being found and masked — by detector, tool, and user (A17)."""
+    return insights.dlp_activity(window_hours=hours)
+
+
+@app.get("/api/admin/approvals/aging")
+def approvals_aging(claims: dict = Depends(require_admin)):
+    """Queue health: what is waiting, how long, what breaches SLA, and how fast decisions
+    actually happen (A18)."""
+    _audit_expired_approvals()
+    return insights.approval_aging(gw)
+
+
+@app.get("/api/admin/lockouts")
+def lockouts(claims: dict = Depends(require_admin)):
+    """Currently locked-out identities in one place, with the unlock action (A20)."""
+    lk = auth.lockout_status()
+    return {"lockouts": [{"sub": s, **v} for s, v in lk.items()], "count": len(lk)}
 
 
 @app.get("/api/admin/operators")
@@ -1268,22 +1586,35 @@ def config_view(claims: dict = Depends(require_admin)):
 
 @app.get("/api/admin/servers")
 def servers_view(claims: dict = Depends(require_admin)):
-    """Per-MCP-server inventory: tool counts, tier spread, breaker state, governance."""
+    """Per-MCP-server inventory: tool counts, tier spread, breaker state, governance —
+    now with the REAL version (from the MCP handshake), uptime, and measured latency
+    (from audit durations). All three were em-dashes in the console (A16)."""
     from .vault import vault
+    stats = insights.server_stats()
+    now = time.time()
     out = []
     for name, srv in gw.mcp.servers.items():
         entries = [e for e in (gw.registry.get(name, t["name"]) for t in srv.tools) if e]
         b = gw._breaker.get(name, {})
+        st = stats.get(name, {})
         out.append({
             "name": name, "tools": len(srv.tools),
             "state": srv.state, "drained": name in gw.drained,
             "transport": srv.transport, "started_at": srv.started_at,
+            "uptime_seconds": round(now - srv.started_at) if srv.started_at
+                              and srv.state == "running" else None,
+            "version": srv.server_version,
+            "protocol_version": srv.protocol_version,
             "breaker_open": gw._breaker_open(name), "fails": b.get("fails", 0),
             "tiers": {str(t): sum(1 for e in entries if e["tier"] == t) for t in range(4)},
             "active": sum(1 for e in entries if e["status"] == "active"),
             "pending": sum(1 for e in entries if e["status"] == "pending"),
             "quarantined": sum(1 for e in entries if e["status"] == "quarantined"),
+            "rejected": sum(1 for e in entries if e["status"] == "rejected"),
             "managed_credentials": vault.manages(name),
+            "calls": st.get("calls", 0), "errors": st.get("errors", 0),
+            "avg_ms": st.get("avg_ms"), "p95_ms": st.get("p95_ms"),
+            "rate_limit": gwsettings.rate_limit_for_server(name),
         })
     return {"servers": out}
 
@@ -1372,7 +1703,10 @@ def metrics(claims: dict = Depends(require_admin)):
 
 @app.get("/api/health")
 def health():
-    ok, msg = audit.verify_chain()
+    # Cached full verification (see audit.chain_status): the health endpoint is polled by
+    # the container healthcheck and every dashboard refresh, and an O(n) HMAC re-pass over
+    # the whole log on each call made the gateway spend its CPU re-proving the same thing.
+    ok, msg = audit.chain_status()
     return {"status": "ok" if gw.started else "starting",
             "auth_mode": auth._MODE,
             "servers": list(gw.mcp.servers.keys()),

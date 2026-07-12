@@ -43,19 +43,35 @@ def _iban_ok(iban: str) -> bool:
         return False
 
 
+def _enabled() -> tuple[bool, dict]:
+    """DLP master switch + per-detector switches, from the runtime settings overlay
+    (admin-editable in the console; falls back to the config baseline)."""
+    try:
+        from . import settings
+        cfg = settings.get("dlp")
+        return bool(cfg.get("enabled", True)), dict(cfg.get("detectors") or {})
+    except Exception:
+        return True, {}
+
+
 def scan(text: str) -> list[dict]:
     """Return a list of detected PII spans: {type, value, start, end}."""
     if not isinstance(text, str):
+        return []
+    on, detectors = _enabled()
+    if not on:
         return []
     found: list[dict] = []
     for m in _ID_RE.finditer(text):
         val = m.group(1)
         kind = "national_id" if val[0] == "1" else "iqama"
-        if _luhn_ok(val):
+        if detectors.get(kind, True) and _luhn_ok(val):
             found.append({"type": kind, "value": val, "start": m.start(), "end": m.end()})
-    for m in _IBAN_RE.finditer(text):
-        if _iban_ok(m.group(0)):
-            found.append({"type": "iban", "value": m.group(0), "start": m.start(), "end": m.end()})
+    if detectors.get("iban", True):
+        for m in _IBAN_RE.finditer(text):
+            if _iban_ok(m.group(0)):
+                found.append({"type": "iban", "value": m.group(0),
+                              "start": m.start(), "end": m.end()})
     return found
 
 

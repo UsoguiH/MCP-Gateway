@@ -3,12 +3,15 @@
 Instead of email/webhooks, the gateway surfaces everything an admin must not miss
 in the dashboard's right panel: approvals waiting, breakers opening, quarantines,
 containment, lockouts, operator lifecycle changes. Notifications derive from the
-audit chain (one integration point — every module already records there), persist
-to DATA_DIR so they survive a restart, and carry read/unread state per deployment
-(single admin console; per-operator read state is a future refinement).
+audit chain (one integration point — every module already records there) and persist
+to DATA_DIR so they survive a restart.
 
-Dedupe: repeated identical events (e.g. a brute-force burst of login_failed)
-collapse into one unread notification with a bumped count instead of a flood.
+Read state is PER OPERATOR (Phase 2, A22): each notification carries the set of
+subjects who have read it. With a shared 2–4 person console, a global read flag meant
+one admin clearing the bell hid the alert from everyone else — a silent way to miss an
+incident. Dedupe still collapses repeats (e.g. a brute-force burst of login_failed)
+into one notification with a bumped count instead of a flood; a bump re-opens it as
+unread for everyone, because it is new information.
 """
 from __future__ import annotations
 
@@ -36,23 +39,49 @@ def _save(items: list[dict]):
                      encoding="utf-8")
 
 
+def _readers(n: dict) -> set[str]:
+    """Subjects who have read this notification. Legacy records carry a global
+    boolean `read`; treat a read-legacy record as read by everyone until someone
+    interacts with it (no false 'unread' storm on upgrade)."""
+    if isinstance(n.get("read_by"), list):
+        return set(n["read_by"])
+    return {"*"} if n.get("read") else set()
+
+
+def _is_read_by(n: dict, sub: str | None) -> bool:
+    r = _readers(n)
+    if "*" in r:
+        return True
+    return bool(sub) and sub in r
+
+
 def notify(severity: str, title: str, detail: str = "", source: str = "gateway",
            key: str | None = None) -> dict:
-    """Append a notification. If `key` matches an UNREAD notification with the same
+    """Append a notification. If `key` matches an unread notification with the same
     key, bump its count and timestamp instead of stacking duplicates."""
     with _LOCK:
         items = _load()
         if key:
             for n in reversed(items):
-                if n.get("key") == key and not n.get("read"):
-                    n["count"] = n.get("count", 1) + 1
-                    n["ts"] = round(time.time(), 3)
-                    n["detail"] = detail or n.get("detail", "")
-                    _save(items)
-                    return n
+                if n.get("key") != key:
+                    continue
+                # A repeat of an event that is STILL HAPPENING: bump the existing record
+                # rather than stacking a flood. The bump is new information, so it becomes
+                # unread (and un-dismissed) for everyone again — including an admin who
+                # had already read the first occurrence. Under per-operator read state,
+                # deduping only onto globally-unread records would stack a burst the
+                # moment one admin glanced at the bell.
+                n["count"] = n.get("count", 1) + 1
+                n["ts"] = round(time.time(), 3)
+                n["detail"] = detail or n.get("detail", "")
+                n["read_by"] = []
+                n.pop("read", None)
+                n.pop("cleared_by", None)
+                _save(items)
+                return n
         n = {"id": uuid.uuid4().hex[:12], "ts": round(time.time(), 3),
              "severity": severity, "title": title, "detail": detail,
-             "source": source, "read": False, "count": 1}
+             "source": source, "read_by": [], "count": 1}
         if key:
             n["key"] = key
         items.append(n)
@@ -60,41 +89,72 @@ def notify(severity: str, title: str, detail: str = "", source: str = "gateway",
         return n
 
 
-def list_all(limit: int = 100) -> list[dict]:
+def _visible(n: dict, sub: str | None) -> bool:
+    return not (sub and sub in (n.get("cleared_by") or []))
+
+
+def list_all(limit: int = 100, sub: str | None = None) -> list[dict]:
+    """Newest first, with `read` resolved for the *asking* operator and anything they
+    have dismissed filtered out."""
     with _LOCK:
-        items = _load()
-    return list(reversed(items[-limit:]))          # newest first
+        items = [n for n in _load() if _visible(n, sub)]
+    out = []
+    for n in reversed(items[-limit:]):
+        out.append({**{k: v for k, v in n.items() if k not in ("read_by", "cleared_by")},
+                    "read": _is_read_by(n, sub)})
+    return out
 
 
-def unread_count() -> int:
+def unread_count(sub: str | None = None) -> int:
     with _LOCK:
-        return sum(1 for n in _load() if not n.get("read"))
+        return sum(1 for n in _load()
+                   if _visible(n, sub) and not _is_read_by(n, sub))
 
 
-def mark_read(ids: list[str] | None = None, mark_all: bool = False) -> int:
-    """Mark notifications read (by id, or everything). Returns how many changed."""
+def mark_read(ids: list[str] | None = None, mark_all: bool = False,
+              sub: str | None = None) -> int:
+    """Mark notifications read for one operator (by id, or all). Returns how many changed."""
+    if not sub:
+        return 0
     changed = 0
     with _LOCK:
         items = _load()
         want = set(ids or [])
         for n in items:
-            if not n.get("read") and (mark_all or n["id"] in want):
-                n["read"] = True
+            if mark_all or n["id"] in want:
+                if _is_read_by(n, sub):
+                    continue
+                readers = _readers(n)
+                readers.discard("*")
+                readers.add(sub)
+                n["read_by"] = sorted(readers)
+                n.pop("read", None)
                 changed += 1
         if changed:
             _save(items)
     return changed
 
 
-def clear_read() -> int:
-    """Drop notifications that have been read. Returns how many were removed."""
+def clear_read(sub: str | None = None) -> int:
+    """Dismiss the notifications THIS operator has already read.
+
+    Clearing is per-operator: the record stays on disk (a colleague may not have seen
+    it, and the audit chain is the permanent record anyway) but disappears from the
+    caller's feed. The ring buffer evicts it in due course. A global delete here would
+    let one admin silently empty everyone else's inbox.
+    """
+    if not sub:
+        return 0
+    cleared = 0
     with _LOCK:
         items = _load()
-        keep = [n for n in items if not n.get("read")]
-        removed = len(items) - len(keep)
-        if removed:
-            _save(keep)
-    return removed
+        for n in items:
+            if _is_read_by(n, sub) and sub not in (n.get("cleared_by") or []):
+                n["cleared_by"] = sorted({*(n.get("cleared_by") or []), sub})
+                cleared += 1
+        if cleared:
+            _save(items)
+    return cleared
 
 
 # ---------------------------------------------------------------------------

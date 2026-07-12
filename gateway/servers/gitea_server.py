@@ -30,8 +30,6 @@ Every tool returns a JSON string; errors come back as
 
 Runs over stdio; the gateway spawns it.
 """
-from __future__ import annotations
-
 import base64
 import json
 import os

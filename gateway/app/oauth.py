@@ -236,6 +236,7 @@ def list_clients() -> list[dict]:
                 "client_name": c.get("client_name", ""),
                 "redirect_uris": c.get("redirect_uris", []),
                 "created": c.get("created"),
+                "last_used": c.get("last_used"),
                 "active_refresh_tokens": len(toks),
                 "subjects": sorted({t["sub"] for t in toks}),
             })
@@ -333,9 +334,23 @@ def _rotate_refresh(refresh_token: str, client_id: str) -> dict:
 # token endpoint grants
 # --------------------------------------------------------------------------
 
+def _touch_client(client_id: str):
+    """Stamp last-use on a client (A21) so an admin can spot a dead registration that
+    should be revoked — or one that suddenly woke up after six months."""
+    with _lock:
+        c = _clients.get(client_id)
+        if not c:
+            return
+        now = int(time.time())
+        if now - int(c.get("last_used") or 0) > 60:       # throttle the disk write
+            c["last_used"] = now
+            _save_clients()
+
+
 def _token_response(sub: str, client_id: str, scope: str) -> dict:
     access, expires_in, _jti = auth.mint_oauth_access(sub, scope=scope)
     refresh = _issue_refresh(sub, client_id, scope)
+    _touch_client(client_id)
     return {
         "access_token": access,
         "token_type": "Bearer",

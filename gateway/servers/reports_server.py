@@ -6,8 +6,6 @@ Read-only: every query runs in a READ ONLY transaction. Configuration via env
 (never model-visible args): POSTGRES_URL / DATABASE_URL, REPORTS_DIR (output).
 Runs over stdio; the gateway spawns it.
 """
-from __future__ import annotations
-
 import html
 import json
 import os

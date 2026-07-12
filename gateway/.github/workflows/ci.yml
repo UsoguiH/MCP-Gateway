@@ -39,6 +39,9 @@ jobs:
               time.sleep(1)
           PY
           python -m pytest tests/test_e2e.py -q
+      - name: Purge test artifacts from data stores
+        if: always()
+        run: python scripts/purge_test_artifacts.py
 
   supply-chain:
     runs-on: ubuntu-latest

@@ -13,6 +13,7 @@ Then:                   python -m pytest tests/test_e2e.py -q
 import base64
 import json
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -316,12 +317,39 @@ def test_anti_hammering_lockout_and_admin_unlock():
 
 def test_killswitch_blocks():
     admin = session("admin")
-    httpx.post(f"{BASE}/api/admin/killswitch/engage", headers=h(admin),
-               json={"scope": "tool:docs:search_documents"})
+    # Phase 2 (A7): containment now REQUIRES a reason and validates the scope — the most
+    # powerful button in the product must leave a trail, and a typo must not silently
+    # protect nothing.
+    r = httpx.post(f"{BASE}/api/admin/killswitch/engage", headers=h(admin),
+                   json={"scope": "tool:docs:search_documents"})
+    assert r.status_code == 400, "a kill switch with no reason must be refused"
+    r = httpx.post(f"{BASE}/api/admin/killswitch/engage", headers=h(admin),
+                   json={"scope": "not-a-valid-scope", "reason": "typo"})
+    assert r.status_code == 400, "an unparseable scope must be refused, not silently accepted"
+
+    r = httpx.post(f"{BASE}/api/admin/killswitch/engage", headers=h(admin),
+                   json={"scope": "tool:docs:search_documents",
+                         "reason": "e2e containment drill"})
+    assert r.status_code == 200
+    detail = next(d for d in r.json()["details"] if d["scope"] == "tool:docs:search_documents")
+    assert detail["by"] == "admin" and detail["reason"] == "e2e containment drill"
+
     assert call1(admin, "docs__search_documents", {"query": "security"})["status"] == "blocked"
     httpx.post(f"{BASE}/api/admin/killswitch/release", headers=h(admin),
                json={"scope": "tool:docs:search_documents"})
     assert call1(admin, "docs__search_documents", {"query": "security"})["status"] == "executed"
+
+
+def test_killswitch_auto_expiry_is_offered():
+    """A forgotten global kill must not be able to strand the organization forever."""
+    admin = session("admin")
+    r = httpx.post(f"{BASE}/api/admin/killswitch/engage", headers=h(admin),
+                   json={"scope": "user:ghost", "reason": "ttl check", "ttl_minutes": 10})
+    assert r.status_code == 200
+    d = next(x for x in r.json()["details"] if x["scope"] == "user:ghost")
+    assert d["expires"] and d["expires"] > time.time()
+    httpx.post(f"{BASE}/api/admin/killswitch/release", headers=h(admin),
+               json={"scope": "user:ghost"})
 
 
 def test_identity_revocation_blocks_in_flight_token():
@@ -394,11 +422,13 @@ def test_per_tool_rate_limit():  # A5
 def test_mcp_resources_list_and_read():
     admin = session("admin"); sid = mcp_initialize(admin)
     r = mcp_rpc(admin, "resources/list", {}, sid=sid, id_=30).json()["result"]
-    names = {x["name"] for x in r["resources"]}
-    assert "docs_index" in names                                # a real resource is exposed
-    uri = next(x["uri"] for x in r["resources"] if x["name"] == "docs_index")
-    assert uri.startswith("mcpgw://")                            # namespaced per server
-    rd = mcp_rpc(admin, "resources/read", {"uri": uri}, sid=sid, id_=31).json()["result"]
+    # Identify the resource by the server's declared URI, not by the display name: the MCP
+    # SDK derives `name` itself and has changed how (1.8.x returns the URI where older
+    # versions returned the function name). The URI is the stable contract.
+    entry = next(x for x in r["resources"]
+                 if "docs" in x["_meta"]["gateway"]["server"] and "index" in x["name"])
+    assert entry["uri"].startswith("mcpgw://")                   # namespaced per server
+    rd = mcp_rpc(admin, "resources/read", {"uri": entry["uri"]}, sid=sid, id_=31).json()["result"]
     assert rd["contents"][0]["text"]                            # content came back
 
 

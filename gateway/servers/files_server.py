@@ -41,8 +41,6 @@ Arabic → latin-1 fallback); .docx via stdlib zipfile (no dependency);
 .pdf via pypdf and .xlsx via openpyxl when installed, otherwise a structured
 hint error. Runs over stdio; the gateway spawns it.
 """
-from __future__ import annotations
-
 import hashlib
 import json
 import os

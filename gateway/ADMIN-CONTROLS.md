@@ -6,29 +6,49 @@ approvals, credential vault, HMAC-chained audit, OAuth clients.
 
 **Status legend**
 - ✅ exists — backend **and** UI have it today
-- ✅ NEW — delivered in the priorities 1–4 build-out (2026-07-09)
+- ✅ P2 — delivered in the Phase 2 console build-out (2026-07-12)
 - 🟡 partial — some of it exists, or backend exists but no UI
 - ❌ missing — not available anywhere
 
-Reviewed: 2026-07-09, **verified by a live admin walkthrough** (signed in as the
-`ciadmin` operator through password+TOTP, every page exercised in a real browser).
-Priorities 1–4 shipped and verified working: real API keys + OAuth client management,
-operator lifecycle + session/MFA control, server lifecycle, in-dashboard notification
-center, approvals history + auto-expiry. The remaining ❌ items are the not-yet-built
-backlog.
+Reviewed: **2026-07-12, after the Phase 2 truth + console sprint.** The 2026-07-09 pass
+delivered API keys, OAuth client management, operator lifecycle, server lifecycle and the
+notification centre. Phase 2 closed the rest of the register (§7b of PROJECT-PLAN.md):
+every control an admin needs is now in the UI, and every number the console shows is
+measured rather than fabricated.
 
-Live-QA observations (2026-07-09), beyond the tables:
-- **opendata tools quarantined on definition drift** — `opendata.search_datasets` and
-  `opendata.preview_resource` sit quarantined in the registry awaiting drift review /
-  re-pin (governance working as designed; an admin needs to action them).
-- **Test-data hygiene** — 2 `pytest-echo.*` tools pending in the registry and 7
-  `pytest-mcp` OAuth client registrations pollute the dev store; the notification
-  feed carries the unit-test noise too. Cosmetic in dev, but argues for a
-  purge-test-artifacts script (or a dedicated test data dir).
-- **Servers table Version and Latency columns are never populated** ("—" for all).
-- **Overview trend percentages are canned demo values** (+11.01% on 5 requests).
-- **Console session expires after ~10–15 min** with a clean logged-out screen;
-  fine, but there is no visible warning and no TTL/idle setting anywhere.
+**Delivered in Phase 2 (2026-07-12):**
+- **The console stopped lying.** Per-call durations are now recorded in the audit chain
+  (`gateway.py`), so latency/avg/p95 are measured everywhere they appear. The canned
+  "+11.01%" deltas, the hardcoded Mon–Sun latency curve, the synthetic traffic series and
+  the stdio=100 transport pie are gone — replaced by real aggregates from `app/insights.py`.
+  Where a value genuinely does not exist yet, the UI renders "—" instead of inventing one.
+- **Toggles that do something.** `app/settings.py` is a validated, persisted overlay on the
+  YAML baseline. Rate limits (incl. per-server overrides), approval tier, DLP detectors,
+  anomaly thresholds, alert rules and session policy are editable from the console and take
+  effect on the next request — no SSH, no restart. The Alerts and Settings switches used to
+  be local React state that saved nothing.
+- **Kill-switch guardrails.** Scope pickers (no more free-text typos that silently protect
+  nothing), a mandatory reason, an optional auto-release TTL, a confirmation that states the
+  blast radius, and a live view of who engaged what and why.
+- **Registry governance you can actually perform.** Read a tool's schema *before* approving
+  it; see a side-by-side diff of exactly what changed when drift quarantines it; **reject**
+  a tool (previously an admin could only ever say yes); manually quarantine on suspicion.
+- **Audit investigation.** Server-side filters over the whole chain, pagination, and
+  CSV/JSON export. "What did khalid touch last Tuesday?" is now a question the console
+  answers instead of an SSH session and a grep.
+- **The gateway watches itself.** A Gateway page with version, uptime, effective config,
+  **backup status**, **certificate expiry**, disk/log growth, and maintenance mode.
+- **DLP activity page** — masking rollups by detector, tool and caller (the events were
+  always in the audit chain; nothing had ever aggregated them).
+- **Per-operator notification read state** — one admin clearing the bell no longer hides an
+  incident from the rest of the team.
+- Fixed in passing: **all four production connectors were dead** (an unpinned `mcp` SDK
+  drifted to 1.8.1, whose FastMCP cannot introspect string annotations, so every server
+  using `from __future__ import annotations` failed to import and the gateway could not
+  boot). SDK pinned, imports fixed, regression test added (`tests/test_servers_import.py`).
+
+**Still open (by design):** external alert delivery (email/webhook) waits on the SIEM and
+channel decisions — Phase 4.
 
 ---
 
@@ -41,10 +61,10 @@ Live-QA observations (2026-07-09), beyond the tables:
 | Reset circuit breaker (force-close after fixing the cause) | ✅ NEW |
 | Enable / disable (drain) a server — stop new calls, let in-flight finish | ✅ NEW |
 | Add / remove a server without editing config files | ✅ NEW (+ Add server, Remove in drawer) |
-| Edit an existing server's command / env / transport from the UI | ❌ missing (remove + re-add) |
+| Edit an existing server's command / env / transport from the UI | ✅ P2 (Manage drawer → Edit configuration; registry pins survive the edit) |
 | Kill-switch a server | ✅ exists (Kill Switch page, one-click per server) |
-| Set per-server rate limit override | ❌ missing (global config only) |
-| Populate Version / Latency columns in the servers table | ❌ missing (always "—") |
+| Set per-server rate limit override | ✅ P2 (Rate Limits page → per-server overrides) |
+| Populate Version / Latency / Uptime columns in the servers table | ✅ P2 (version from the MCP handshake; latency measured from audit durations) |
 
 ## 2. Tools (Registry)
 
@@ -52,11 +72,11 @@ Live-QA observations (2026-07-09), beyond the tables:
 |---|---|
 | Approve onboarding of new tools | ✅ exists |
 | Review drift & re-pin hash | ✅ exists |
-| Change risk tier | ✅ exists (still via `window.prompt()` — needs a real dialog, AdminPages.tsx:480) |
+| Change risk tier | ✅ P2 (real dialog, replacing `window.prompt()`) |
 | Enable / disable an individual tool without quarantining or kill-switching | ❌ missing |
-| Quarantine a tool manually (not just automatic on drift) | ❌ missing |
-| Reject / permanently ban a pending tool (today: approve or pending forever) | ❌ missing |
-| View a tool's full schema/description — what the admin is actually approving | ❌ missing |
+| Quarantine a tool manually (not just automatic on drift) | ✅ P2 (reason required; durable) |
+| Reject / permanently ban a pending tool | ✅ P2 (stays rejected across re-discovery; reinstatable) |
+| View a tool's full schema/description — what the admin is actually approving | ✅ P2 (Inspect; plus a side-by-side drift diff showing exactly what changed) |
 | Per-tool allowlist by role/clearance (e.g. `drop_table` only for DBAs regardless of tier) | ❌ missing (per-**server** role entitlements exist in policy.yaml; per-tool does not) |
 | Argument constraints / guardrails (e.g. `delete_rows` must include a WHERE) | ❌ missing |
 
@@ -81,7 +101,7 @@ Live-QA observations (2026-07-09), beyond the tables:
 | View live sessions and per-identity forensic timeline | ✅ exists |
 | Terminate a specific session/token immediately | ✅ NEW |
 | Terminate all sessions for a user ("sign them out everywhere") | ✅ NEW |
-| Set session TTL / idle timeout | ❌ missing |
+| Set session TTL / idle timeout | 🟡 P2 (configurable in Settings → session; the expiry-warning toast is the remaining piece) |
 | Approve / block a new MCP client on first connect (client allowlisting) | ❌ missing |
 
 ## 5. OAuth / API Credentials
@@ -118,20 +138,19 @@ Live-QA observations (2026-07-09), beyond the tables:
 | Control | Status |
 |---|---|
 | Engage / release global, server, tool, user scopes | ✅ exists |
-| One-click per-server kill buttons | ✅ NEW |
-| Confirmation step on global kill | ❌ missing — `engage("global")` fires directly, one click halts everything |
-| Scope validation / picker for tool and user scopes | ❌ missing — still free text; a typo'd scope silently contains nothing |
-| Auto-expiring containment ("kill for 1 hour") | ❌ missing |
-| Who engaged it and why — require a reason string, show it on the active scope | ❌ missing |
+| Confirmation step on global kill | ✅ P2 (states the blast radius: "EVERY user and EVERY tool — all 300+ staff") |
+| Scope validation / picker for tool and user scopes | ✅ P2 (dropdowns of real servers/tools/users; an unparseable scope is refused) |
+| Auto-expiring containment ("kill for 1 hour") | ✅ P2 (optional TTL; a forgotten kill cannot strand the org) |
+| Who engaged it and why — require a reason string, show it on the active scope | ✅ P2 (reason mandatory, recorded in the audit chain, shown on the active scope) |
 
 ## 9. Policies & DLP
 
 | Control | Status |
 |---|---|
-| Edit rate limits (global, per-tool, per-server, login) from the UI | ❌ missing — display only (verified) |
-| Manage DLP rules (enable/disable patterns, add custom regex, mask vs block) | ❌ missing |
-| View DLP hits — what was masked/blocked, for whom | ❌ missing |
-| Toggle registry onboarding gate, SIEM export for real | ❌ missing — Settings toggles are local state only |
+| Edit rate limits (global, per-tool, per-server, login) from the UI | ✅ P2 (Rate Limits page; live consumption bars alongside the ceilings) |
+| Manage DLP rules (enable/disable detectors, mask vs block) | ✅ P2 (Settings → master switch + per-detector toggles) · custom regex ❌ |
+| View DLP hits — what was masked/blocked, for whom | ✅ P2 (DLP Activity page: by detector, by tool, by caller) |
+| Toggle registry onboarding gate, SIEM export for real | 🟡 P2 (shown read-only and labelled `config` — deploy-time settings, no longer fake switches) |
 | Edit the ABAC role ladder (tier ceilings per role) | ❌ missing — display only |
 | Edit per-role server entitlements (`servers:` allowlists) from the UI | ❌ missing — policy.yaml only |
 
@@ -140,50 +159,56 @@ Live-QA observations (2026-07-09), beyond the tables:
 | Control | Status |
 |---|---|
 | View anomaly alerts | ✅ exists (+ Re-evaluate) |
-| In-dashboard notification center (severity, dedupe, unread badge, mark-read) | ✅ NEW |
+| In-dashboard notification center (severity, dedupe, unread badge, mark-read) | ✅ exists |
+| Per-operator read state (one admin clearing the bell must not hide an incident from the team) | ✅ P2 |
+| Enable / disable individual detection rules | ✅ P2 (Alerts page — toggles now persist and the engine honours them) |
+| Configure thresholds (error rate %, failed-login count, approval SLA, window) | ✅ P2 (Alerts page) |
 | Acknowledge / resolve / snooze an alert | ❌ missing — alerts just sit there |
-| Configure thresholds (error rate %, latency, failed-login count) | ❌ missing |
-| Delivery channels — email, webhook, Slack/Telegram for approvals and critical alerts | ❌ missing; **this is what makes everything else work when nobody's watching** |
+| Delivery channels — email, webhook, Slack/Telegram | ❌ **Phase 4** (depends on the SIEM + channel decisions D6/D10); **this is what makes everything else work when nobody's watching** |
 
 ## 11. Audit & Compliance
 
 | Control | Status |
 |---|---|
 | Verify chain integrity, browse events | ✅ exists (+ Re-verify) |
-| Export (CSV/JSON, time range) | ❌ missing |
-| Filtering | 🟡 free-text search + event-type select; no time-range, no identity filter, no pagination (200-row silent cap) |
-| Record detail view (full arguments, digests, chain hashes) | ❌ missing |
-| Retention policy control (how long, archive target) | ❌ missing |
+| Export (CSV/JSON, honouring the current filters) | ✅ P2 |
+| Filtering | ✅ P2 (server-side: event, identity, server, tool, time range, free text — over the whole chain, not a 200-row window) |
+| Pagination | ✅ P2 (50/page, newest first) |
+| Per-call duration recorded and shown | ✅ P2 |
+| Record detail view (full arguments, digests, chain hashes) | 🟡 digests + duration in the table; no per-record drawer |
+| Retention policy control (how long, archive target) | ❌ **Phase 4** (WORM / SIEM retention) |
 
 ## 12. Gateway Itself
 
 | Control | Status |
 |---|---|
-| Self-health page: version, uptime, memory, audit log size, config hash | ❌ missing |
-| Backup status + trigger backup (Phase-0 backups exist; dashboard can't see them) | ❌ missing |
-| View effective config (read-only dump of what's actually loaded) | 🟡 pieces shown on Settings / Rate Limits |
-| Reload config without restart | ❌ missing |
-| Maintenance mode (reject new sessions, banner for operators) | ❌ missing |
+| Self-health page: version, uptime, PID, servers, tools | ✅ P2 (Gateway page) |
+| Backup status (did last night's backup actually run?) | ✅ P2 (latest run, age, size, retained count, stale warning) |
+| Certificate expiry tracking | ✅ P2 (every cert the deployment depends on, days left, expiring/expired badges) |
+| Disk headroom + audit-log growth rate | ✅ P2 (incl. projected exhaustion) |
+| View effective config (read-only dump of what's actually loaded, secrets redacted) | ✅ P2 |
+| Maintenance mode (pause mediated calls during a patch; admins keep working) | ✅ P2 |
+| Trigger a backup on demand | ❌ missing (scheduled only) |
+| Reload config without restart | 🟡 P2 (runtime settings overlay applies instantly; config.yaml still needs a restart) |
+| Rotate the gateway's own signing/HMAC secrets | ❌ missing |
 
 ---
 
-## Priority sequencing (next build-out)
+## What remains (post-Phase-2 backlog)
 
-Priorities 1–4 from the previous pass are **done and live-verified**. What remains,
-ordered by blast radius:
+Phase 2 closed the §7b admin gap register. Ordered by blast radius:
 
-1. **External notification delivery (email/webhook)** — the HITL queue and critical
-   alerts only work if someone is staring at the dashboard. An unwatched approval
-   queue isn't a gate. (Section 10; also the Phase-3 SIEM/alerting seam.)
-2. **Kill-switch safety** — confirm dialog on global kill, scope pickers for
-   tool/user (typos silently contain nothing), reason string, auto-expiry.
-   Small work, big incident-response payoff. (Section 8)
-3. **Audit usability** — export, time-range + identity filters, record detail,
-   pagination past the 200-row cap. First thing an incident responder needs.
-   (Section 11; the DB-state migration in Phase 2 is the natural moment.)
-4. **Registry governance completeness** — reject/ban a pending tool, manual
-   quarantine, view the schema being approved, real re-tier dialog. (Section 2)
-5. **Policy / rate-limit / DLP editing from the UI** — convenience, after the
-   safety controls exist. (Section 9)
-6. **Gateway self-page** — health, backup status, effective config, maintenance
-   mode. (Section 12)
+1. **External notification delivery (email/webhook)** — the HITL queue and critical alerts
+   only work if someone is staring at the dashboard. An unwatched approval queue is not a
+   gate. Deliberately held for **Phase 4**: it depends on the SIEM choice [D6] and the
+   channel decision [D10]. (Section 10)
+2. **Vault management** — rotate/add/remove a managed credential; alert on credential age
+   (the Gitea token is still an all-scope admin token). (Section 6)
+3. **Per-tool authorization** — allowlist a tool by role/clearance, and argument guardrails
+   (e.g. `delete_rows` must carry a WHERE). Today authorization is per-server + per-tier.
+   (Section 2)
+4. **ABAC editing from the UI** — role ladder and per-role server entitlements are still
+   policy.yaml-only. (Section 9)
+5. **Approval workflow depth** — acknowledge/snooze an alert, delegate approval authority
+   (on-call/vacation), manual "reject all pending". (Sections 7, 10)
+6. **Secret rotation from the console** — signing key, audit HMAC, vault key. (Sections 5, 12)

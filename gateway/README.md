@@ -79,9 +79,17 @@ them for production with `auth.hash_password()` and overwrite `data/credentials.
 ## Test it
 
 ```bash
-python -m pytest tests/test_security.py tests/test_auth.py tests/test_fuzz.py -q  # 53 unit + fuzz
-# start the server, then:
-python -m pytest tests/test_e2e.py -q           # 32 end-to-end HTTP tests
+# Offline suites — no server, no Docker (security, auth, hardening, fuzz, DLP,
+# approvals lifecycle, files-mcp, the console back-end, and the server-import guard):
+python -m pytest tests/ -q --ignore=tests/test_e2e.py --ignore=tests/test_oauth.py \
+                          --ignore=tests/test_admin_controls.py
+
+# Live suites — start the gateway on :8800 first, then:
+python -m pytest tests/test_e2e.py tests/test_oauth.py tests/test_admin_controls.py -q
+
+# Everything. The postgres/gitea lifecycle tests skip cleanly without their
+# mcp-test-pg / mcp-test-gitea docker fixtures.
+python -m pytest tests/ -q
 ```
 
 ## Connecting a model (inference is client-side)

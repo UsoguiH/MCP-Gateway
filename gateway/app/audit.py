@@ -102,7 +102,9 @@ def record(event: str, **fields) -> dict:
 
 
 def verify_chain() -> tuple[bool, str]:
-    """Recompute the chain. Returns (ok, message)."""
+    """Recompute the WHOLE chain. Returns (ok, message). O(n) in the log length —
+    every record's HMAC is recomputed, which is the point: it is what makes tampering
+    detectable. Callers on a hot path should use `chain_status()` instead."""
     if not _LOG.exists():
         return True, "empty log"
     prev = GENESIS
@@ -121,6 +123,31 @@ def verify_chain() -> tuple[bool, str]:
             prev = stored
             n += 1
     return True, f"chain intact: {n} records"
+
+
+# A full verification is O(n) and, on a real log, seconds of CPU: at 6.5k records it
+# measured 3.6 s. /api/health ran it on EVERY request — including the container
+# healthcheck every 30 s and every dashboard poll — so the gateway spent most of its CPU
+# re-proving the same thing and slow requests began timing out. The check still runs in
+# full (nothing is skipped), just at most once per TTL. The Audit page's "Re-verify" button
+# (/api/admin/audit/verify) calls verify_chain() directly to force a fresh pass on demand.
+_VERIFY_TTL = 60.0
+_verify_cache: dict = {"ts": 0.0, "result": None}
+
+
+def chain_status(max_age: float = _VERIFY_TTL) -> tuple[bool, str]:
+    """Cached full-chain verification — safe for hot paths (health, dashboard polls)."""
+    now = time.time()
+    with _LOCK:
+        cached = _verify_cache["result"]
+        fresh = cached is not None and (now - _verify_cache["ts"]) < max_age
+    if fresh:
+        return cached
+    result = verify_chain()               # full pass, outside the lock (it reads the file)
+    with _LOCK:
+        _verify_cache["ts"] = time.time()
+        _verify_cache["result"] = result
+    return result
 
 
 def tail(n: int = 100) -> list[dict]:

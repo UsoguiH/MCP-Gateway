@@ -85,13 +85,20 @@ class Registry:
             )
 
     def reconcile(self, tools: list[dict]) -> list[dict]:
-        """Compare discovered tools against pinned entries. Returns list of change events."""
+        """Compare discovered tools against pinned entries. Returns list of change events.
+
+        The pinned DEFINITION (description + schema) is stored alongside the hash so an
+        admin can (a) read a tool's schema before approving it and (b) see exactly what
+        changed when drift quarantines it — approving a hash you can't inspect is not
+        governance (A8/A24).
+        """
         events = []
         seen = set()
         for t in tools:
             key = self._key(t["server"], t["name"])
             seen.add(key)
             fp = tool_fingerprint(t)
+            definition = {"description": t.get("description", ""), "schema": t.get("schema", {})}
             entry = self.entries.get(key)
             if entry is None:
                 status = "pending" if _REQUIRE_APPROVAL else "active"
@@ -102,14 +109,20 @@ class Registry:
                     "fingerprint": fp,
                     "status": status,         # prod: pending until Risk-Board approves
                     "quarantine_reason": None,
+                    "definition": definition,
                 }
                 events.append({"type": "new_tool", "key": key,
                                "tier": self.entries[key]["tier"], "status": status})
+            elif entry["status"] == "rejected":
+                continue                      # banned by an admin: never silently resurrect
             elif entry["fingerprint"] != fp:
                 entry["status"] = "quarantined"
                 entry["quarantine_reason"] = "definition_drift"
                 entry["pending_fingerprint"] = fp
+                entry["pending_definition"] = definition   # the "after" side of the diff
                 events.append({"type": "drift_quarantine", "key": key})
+            elif not entry.get("definition"):
+                entry["definition"] = definition           # backfill pre-Phase-2 entries
         self._save()
         return events
 
@@ -147,13 +160,71 @@ class Registry:
         e = self.get(server, tool)
         if e and e.get("pending_fingerprint"):
             e["fingerprint"] = e.pop("pending_fingerprint")
+            if e.get("pending_definition"):
+                e["definition"] = e.pop("pending_definition")
             e["status"] = "active"
             e["quarantine_reason"] = None
             self._save()
 
-    def quarantine(self, server: str, tool: str, reason: str):
+    def quarantine(self, server: str, tool: str, reason: str) -> bool:
+        """Manual containment of one tool (admin) — narrower than a kill switch and
+        it survives a restart because the registry is the gate every call passes."""
         e = self.get(server, tool)
-        if e:
-            e["status"] = "quarantined"
-            e["quarantine_reason"] = reason
-            self._save()
+        if not e:
+            return False
+        e["status"] = "quarantined"
+        e["quarantine_reason"] = reason or "manual"
+        self._save()
+        return True
+
+    def unquarantine(self, server: str, tool: str) -> bool:
+        """Release a manually quarantined tool. A tool quarantined by DRIFT is not
+        released here — that path must go through approve_drift (re-pin the hash),
+        so a definition change can never be waved through by accident."""
+        e = self.get(server, tool)
+        if not e or e["status"] != "quarantined":
+            return False
+        if e.get("pending_fingerprint"):
+            return False
+        e["status"] = "active"
+        e["quarantine_reason"] = None
+        self._save()
+        return True
+
+    def reject(self, server: str, tool: str, reason: str = "") -> bool:
+        """Risk-Board REJECTION of a tool: it stays known and permanently inactive, and
+        reconcile() will not resurrect it on the next discovery. The counterpart to
+        approve_tool — until now an admin could only ever say yes."""
+        e = self.get(server, tool)
+        if not e:
+            return False
+        e["status"] = "rejected"
+        e["quarantine_reason"] = (reason or "rejected by Risk Board")[:200]
+        self._save()
+        return True
+
+    def reinstate(self, server: str, tool: str) -> bool:
+        """Undo a rejection — the tool returns to `pending` for a fresh decision."""
+        e = self.get(server, tool)
+        if not e or e["status"] != "rejected":
+            return False
+        e["status"] = "pending"
+        e["quarantine_reason"] = None
+        self._save()
+        return True
+
+    def drift_diff(self, server: str, tool: str) -> dict | None:
+        """What actually changed in a quarantined tool: pinned vs pending definition."""
+        e = self.get(server, tool)
+        if not e or not e.get("pending_fingerprint"):
+            return None
+        old = e.get("definition") or {}
+        new = e.get("pending_definition") or {}
+        changed = [f for f in ("description", "schema") if old.get(f) != new.get(f)]
+        return {
+            "server": server, "tool": tool,
+            "pinned_fingerprint": e["fingerprint"],
+            "pending_fingerprint": e["pending_fingerprint"],
+            "changed_fields": changed,
+            "old": old, "new": new,
+        }
