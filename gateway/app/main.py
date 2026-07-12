@@ -58,7 +58,15 @@ async def _approval_sweeper(interval_s: int = 300):
 async def lifespan(app: FastAPI):
     import asyncio
     await gw.startup()
-    audit.record("gateway_startup", servers=list(gw.mcp.servers.keys()))
+    # Verify the ENTIRE audit chain once, at boot: it seeds the incremental verifier's
+    # state and is the pass that would catch an edit to a historical record (something an
+    # incremental check, by construction, cannot). Every later check is incremental and
+    # effectively free — see audit.chain_status.
+    chain_ok, chain_msg = audit.chain_status(full=True)
+    if not chain_ok:
+        print(f"AUDIT CHAIN INTEGRITY FAILURE: {chain_msg}", file=os.sys.stderr)
+    audit.record("gateway_startup", servers=list(gw.mcp.servers.keys()),
+                 chain_ok=chain_ok, chain_status=chain_msg)
     sweeper = asyncio.create_task(_approval_sweeper())
     yield
     sweeper.cancel()
@@ -955,8 +963,7 @@ def audit_verify(claims: dict = Depends(require_admin)):
     """Force a FULL re-verification of the hash chain (the console's Re-verify button).
     Deliberately not cached: this is the tamper-evidence check, and an operator asking for
     it must get a fresh answer, however long the log is."""
-    ok, msg = audit.verify_chain()
-    audit._verify_cache.update({"ts": time.time(), "result": (ok, msg)})
+    ok, msg = audit.chain_status(full=True)      # every record, from genesis
     audit.record("audit_chain_verified", by=claims["sub"], ok=ok, detail=msg)
     return {"chain_ok": ok, "chain_status": msg}
 

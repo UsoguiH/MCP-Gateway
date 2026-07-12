@@ -125,29 +125,81 @@ def verify_chain() -> tuple[bool, str]:
     return True, f"chain intact: {n} records"
 
 
-# A full verification is O(n) and, on a real log, seconds of CPU: at 6.5k records it
-# measured 3.6 s. /api/health ran it on EVERY request — including the container
+# ---------------------------------------------------------------------------
+# Incremental verification for the hot path
+# ---------------------------------------------------------------------------
+# A full verification is O(n) and, on a real log, seconds of CPU (3.6 s at 6.5k records,
+# and it only grows). /api/health ran one on EVERY request — including the container
 # healthcheck every 30 s and every dashboard poll — so the gateway spent most of its CPU
-# re-proving the same thing and slow requests began timing out. The check still runs in
-# full (nothing is skipped), just at most once per TTL. The Audit page's "Re-verify" button
-# (/api/admin/audit/verify) calls verify_chain() directly to force a fresh pass on demand.
-_VERIFY_TTL = 60.0
-_verify_cache: dict = {"ts": 0.0, "result": None}
+# re-proving the same thing, and requests started timing out.
+#
+# The chain is APPEND-ONLY, so the hot path does not need to re-verify history it has
+# already verified: we remember the byte offset, record count and last hash of the verified
+# prefix, and each check only walks the records appended since. That is O(new records),
+# i.e. effectively free, and it still catches a broken link or a forged record the moment
+# one is appended.
+#
+# It cannot, by construction, re-detect an edit to an OLD record — so a FULL pass still runs
+# (a) at startup, seeding the state, and (b) whenever an operator hits Re-verify. Forging an
+# old record requires the HMAC key; without it, any edit invalidates that record's own hash,
+# which the next full pass catches.
+_verify_lock = threading.Lock()
+_verify_state: dict = {"offset": 0, "count": 0, "last": GENESIS,
+                       "ok": True, "msg": "empty log", "checked": 0.0}
 
 
-def chain_status(max_age: float = _VERIFY_TTL) -> tuple[bool, str]:
-    """Cached full-chain verification — safe for hot paths (health, dashboard polls)."""
-    now = time.time()
-    with _LOCK:
-        cached = _verify_cache["result"]
-        fresh = cached is not None and (now - _verify_cache["ts"]) < max_age
-    if fresh:
-        return cached
-    result = verify_chain()               # full pass, outside the lock (it reads the file)
-    with _LOCK:
-        _verify_cache["ts"] = time.time()
-        _verify_cache["result"] = result
-    return result
+def _verify_span(offset: int, prev: str, count: int) -> tuple:
+    """Verify the records after `offset`, continuing the chain from `prev`.
+    Returns (ok, msg, new_offset, new_prev, new_count). Only whole lines are consumed."""
+    with open(_LOG, "rb") as f:
+        f.seek(offset)
+        blob = f.read()
+    consumed = 0
+    for raw in blob.splitlines(keepends=True):
+        if not raw.endswith(b"\n"):
+            break                                    # a partial trailing write: stop here
+        consumed += len(raw)
+        line = raw.decode("utf-8").strip()
+        if not line:
+            continue
+        entry = json.loads(line)
+        stored = entry.pop("hash")
+        count += 1
+        if entry["prev"] != prev:
+            return False, f"broken link at record {count}: prev mismatch", offset, prev, count
+        if _hash(entry) != stored:
+            return False, f"tampered content at record {count}: hash mismatch", offset, prev, count
+        prev = stored
+    return True, f"chain intact: {count} records", offset + consumed, prev, count
+
+
+def chain_status(full: bool = False) -> tuple[bool, str]:
+    """Verify the chain cheaply — safe for hot paths (health, dashboard polls).
+
+    Incremental by default: only records appended since the last check are hashed.
+    `full=True` re-verifies every record from genesis (the Re-verify button, startup).
+    Once a break is found the failure is sticky until a full pass clears it.
+    """
+    if not _LOG.exists():
+        return True, "empty log"
+    with _verify_lock:
+        st = _verify_state
+        if full:
+            st.update({"offset": 0, "count": 0, "last": GENESIS, "ok": True})
+        elif not st["ok"]:
+            return False, st["msg"]                  # stay broken until someone re-verifies
+        try:
+            size = _LOG.stat().st_size
+            if size < st["offset"]:                  # log truncated/rotated → re-verify all
+                st.update({"offset": 0, "count": 0, "last": GENESIS, "ok": True})
+            elif size == st["offset"] and st["count"]:
+                return True, st["msg"]               # nothing appended since the last check
+            ok, msg, offset, last, count = _verify_span(st["offset"], st["last"], st["count"])
+        except (OSError, ValueError, KeyError) as exc:
+            return False, f"audit log unreadable: {exc}"
+        st.update({"offset": offset, "count": count, "last": last, "ok": ok, "msg": msg,
+                   "checked": time.time()})
+        return ok, msg
 
 
 def tail(n: int = 100) -> list[dict]:

@@ -397,33 +397,80 @@ def test_exception_group_is_flattened_to_its_root_cause():
 
 
 # ─────────── audit chain: cached verification must stay CORRECT (perf fix) ──
-def test_chain_status_caches_but_verify_chain_still_detects_tampering(tmp_path, monkeypatch):
-    """The hot paths (health, dashboard polls) use a cached full verification because an
-    O(n) HMAC re-pass per request cost seconds of CPU. The cache must never turn the
-    tamper-evidence check into a lie: a forced verify_chain() still catches an edit."""
+@pytest.fixture
+def audit_chain(tmp_path, monkeypatch):
+    """An isolated audit log with a fresh incremental-verifier state."""
     import app.audit as amod
-    log = tmp_path / "audit.jsonl"
-    monkeypatch.setattr(amod, "_LOG", log)
-    monkeypatch.setattr(amod, "_verify_cache", {"ts": 0.0, "result": None})
-    monkeypatch.setattr(amod, "notifications", None, raising=False)
+    monkeypatch.setattr(amod, "_LOG", tmp_path / "audit.jsonl")
+    monkeypatch.setattr(amod, "_verify_state",
+                        {"offset": 0, "count": 0, "last": amod.GENESIS,
+                         "ok": True, "msg": "empty log", "checked": 0.0})
+    return amod
 
+
+def test_chain_status_is_incremental_and_still_catches_a_forged_record(audit_chain):
+    """The hot path (health, dashboard polls) must not re-hash the whole log on every
+    request — but it must still catch a forgery the moment one is appended."""
+    amod = audit_chain
     for i in range(3):
         amod.record("tool_call", user="sara", tool=f"t{i}")
     ok, msg = amod.chain_status()
     assert ok and "3 records" in msg
+    assert amod._verify_state["count"] == 3
 
-    cached = amod.chain_status()                 # served from cache, same answer
-    assert cached == (ok, msg)
+    # Nothing appended -> nothing re-verified (the whole point).
+    before = amod._verify_state["offset"]
+    assert amod.chain_status() == (ok, msg)
+    assert amod._verify_state["offset"] == before
 
-    # tamper with a record on disk
-    lines = log.read_text(encoding="utf-8").splitlines()
-    entry = json.loads(lines[1])
-    entry["user"] = "mallory"                    # rewrite history
-    lines[1] = json.dumps(entry)
-    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # A new record is verified incrementally.
+    amod.record("tool_call", user="khalid", tool="t3")
+    ok, msg = amod.chain_status()
+    assert ok and "4 records" in msg
 
-    bad_ok, bad_msg = amod.verify_chain()        # the forced pass must catch it
+    # Append a FORGED record (a plausible entry with a bogus hash): the incremental pass
+    # must reject it, and the failure must be sticky.
+    forged = {"ts": time.time(), "event": "tool_call", "user": "mallory",
+              "tool": "drop_table", "prev": amod._verify_state["last"], "hash": "0" * 64}
+    with open(amod._LOG, "a", encoding="utf-8") as f:
+        f.write(json.dumps(forged) + "\n")
+    bad_ok, bad_msg = amod.chain_status()
     assert bad_ok is False and "tampered" in bad_msg
+    assert amod.chain_status()[0] is False          # stays broken, no silent recovery
+
+
+def test_full_verification_catches_an_edit_to_history(audit_chain):
+    """An incremental check cannot re-detect an edit to an ALREADY-verified record — that is
+    what the full pass (startup, and the Re-verify button) is for. It must catch it."""
+    amod = audit_chain
+    for i in range(3):
+        amod.record("tool_call", user="sara", tool=f"t{i}")
+    assert amod.chain_status()[0] is True           # prefix now trusted
+
+    lines = amod._LOG.read_text(encoding="utf-8").splitlines()
+    entry = json.loads(lines[1])
+    entry["user"] = "mallory"                       # rewrite history in place
+    lines[1] = json.dumps(entry)
+    amod._LOG.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    ok, msg = amod.chain_status(full=True)          # the pass that re-reads everything
+    assert ok is False and "tampered" in msg
+    assert amod.verify_chain()[0] is False          # and the standalone full check agrees
+
+
+def test_chain_status_handles_a_truncated_log(audit_chain):
+    """A rotated or truncated log must re-verify from genesis, not silently trust a stale
+    offset that now points past the end of the file."""
+    amod = audit_chain
+    for i in range(3):
+        amod.record("tool_call", user="sara", tool=f"t{i}")
+    assert amod.chain_status()[0] is True
+    assert amod._verify_state["offset"] > 0
+
+    amod._LOG.write_text("", encoding="utf-8")      # truncated
+    ok, msg = amod.chain_status()
+    assert ok is True and "0 records" in msg
+    assert amod._verify_state["offset"] == 0
 
 
 def test_insights_record_cache_invalidates_on_append(tmp_path, monkeypatch):
