@@ -112,8 +112,12 @@ def test_preview_uses_the_real_visibility_logic(monkeypatch):
     gw.mcp = types.SimpleNamespace(all_tools=lambda: tools,
                                    servers={"files": None, "postgres": None})
     reg = {("files", "read"): 0, ("postgres", "query"): 0, ("postgres", "drop_table"): 3}
+    # visible_tools takes ONE snapshot of `entries` (keyed "<server>:<tool>") rather than
+    # calling get() per tool — see Registry._maybe_reload for why. The double mirrors both.
+    entries = {f"{s}:{t}": {"tier": tier, "status": "active"} for (s, t), tier in reg.items()}
     gw.registry = types.SimpleNamespace(
-        get=lambda s, t: {"tier": reg.get((s, t)), "status": "active"} if (s, t) in reg else None)
+        entries=entries,
+        get=lambda s, t: entries.get(f"{s}:{t}"))
 
     # analyst: entitled to files+postgres, max tier 2 → sees read + query, NOT drop_table (t3)
     monkeypatch.setattr("app.config.POLICY", {

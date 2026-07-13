@@ -89,11 +89,25 @@ python -m pytest tests/ -q --ignore=tests/test_e2e.py --ignore=tests/test_oauth.
                           --ignore=tests/test_admin_controls.py
 
 # Live suites — start the gateway on :8800 first, then:
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8800     # (kill any stale one first!)
 python -m pytest tests/test_e2e.py tests/test_oauth.py tests/test_admin_controls.py -q
 
-# Everything. The postgres/gitea lifecycle tests skip cleanly without their
+# Everything. The postgres/gitea/gwstate suites skip cleanly without their
 # mcp-test-pg / mcp-test-gitea docker fixtures.
 python -m pytest tests/ -q
+```
+
+> A **stale gateway left on :8800** is the classic trap: the live suites then drive the OLD
+> process (silently passing, or timing out) instead of your code. If `test_e2e` fails wholesale
+> with `ReadTimeout`/`ConnectError`, kill whatever holds the port and start a fresh one.
+
+The Phase-3 shared-state suite (`tests/test_statestore.py`) needs a throwaway PostgreSQL and
+creates/drops its own `gwstate_test` database:
+
+```bash
+docker run -d --name mcp-test-pg -e POSTGRES_PASSWORD=mcptest -e POSTGRES_DB=mcpdb \
+  -p 15432:5432 postgres:17
+python -m pytest tests/test_statestore.py -q      # skips cleanly if that container is absent
 ```
 
 ## Connecting a model (inference is client-side)
@@ -130,7 +144,17 @@ context/audit); **registry onboarding governance** (Risk-Board approval of new t
 (Keycloak/OIDC) auth mode**; **startup config validation**; **metrics + SIEM export**; and
 **deployment artifacts** (`requirements.txt`, `Dockerfile`, `docker-compose.yml`, CI); **NDMO
 classification propagation**; **strict tool-arg schema validation** (`additionalProperties:false`);
-parser-fuzz suite; OpenBao vault adapter. **85 tests green.**
+parser-fuzz suite; OpenBao vault adapter.
+
+**Phase 3 (state & scale)** adds a shared **PostgreSQL state backend** (`MCP_STATE_DB_URL` →
+`app/statestore.py`): the audit chain, approvals **and their executed results**, registry,
+identities, OAuth, API keys, notifications and containment become durable shared rows, and the
+runtime tier (MCP sessions, rate windows, circuit breaker, taint, lockouts, vault leases) becomes
+shared UNLOGGED rows. That makes the gateway **horizontally scalable** — `docker-compose.ha.yml`
+runs two instances behind an mTLS load balancer with **no sticky sessions**, and killing a node
+drops zero sessions. Flat files remain the zero-setup dev/test default, and
+`scripts/migrate_state.py` moves state either way (chain verified before *and* after; rollback
+reproduces a byte-identical, independently verifiable audit JSONL).
 
 ## Operator-provided infrastructure (seams ready, not buildable on a dev box)
 Production MCP server selection; client-side LLM hosts + brokered confidential-compute GPU; HSM + workstation TPM; a Keycloak host

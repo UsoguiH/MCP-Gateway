@@ -23,8 +23,8 @@ import re
 import sys
 from pathlib import Path
 
-PREFIXES = ("pytest-",)                    # matches pytest-echo, pytest-mcp, pytest-key ...
-_TMP_OPERATOR = re.compile(r"^tmp[0-9a-f]{6}$")   # test_operator_lifecycle naming
+PREFIXES = ("pytest-", "loadtest-")        # pytest-echo, pytest-mcp, loadtest-0001 ...
+_TMP_OPERATOR = re.compile(r"^(tmp[0-9a-f]{6}|loadtest-\d{4})$")  # test/loadtest naming
 _TEST_OPERATOR_NAME = "pytest"                     # operators created as "Pytest Temp"
 
 
@@ -152,19 +152,78 @@ def purge(data_dir: Path, prefixes=PREFIXES, dry_run: bool = False) -> dict[str,
     return removed
 
 
+def purge_db(prefixes=PREFIXES, dry_run: bool = False) -> dict[str, list[str]]:
+    """Phase 3: same sweep against the shared gwstate database (MCP_STATE_DB_URL).
+    The row shapes mirror the files, so the same match rules apply."""
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    from app import statestore
+    removed: dict[str, list[str]] = {}
+
+    def sweep(store, table, key_col, match):
+        rows = statestore.all_rows(f"SELECT {key_col}, doc FROM {table}")
+        dead = [k for k, doc in rows if match(k, doc)]
+        if dead and not dry_run:
+            for k in dead:
+                statestore.run(f"DELETE FROM {table} WHERE {key_col} = %s", (k,))
+        if dead:
+            removed[store] = dead
+        return dead
+
+    sweep("tool_registry", "registry_tools", "key",
+          lambda k, e: _is_test_name(k, prefixes) or _is_test_name(e.get("server"), prefixes))
+    dead_clients = sweep("oauth_clients", "oauth_clients", "client_id",
+                         lambda k, c: _is_test_name(c.get("client_name"), prefixes))
+    if dead_clients and not dry_run:
+        statestore.run("DELETE FROM oauth_refresh WHERE doc->>'client_id' = ANY(%s)",
+                       (dead_clients,))
+    sweep("api_keys", "api_keys", "kid",
+          lambda k, rec: _is_test_name(rec.get("name"), prefixes))
+    dead_subs = sweep("operators", "operators", "sub",
+                      lambda sub, rec: _is_test_operator(sub, rec)
+                      or _is_test_name(sub, prefixes))
+    if not dry_run:
+        for sub in dead_subs:
+            for table in ("credentials", "mfa_secrets", "session_nb", "lockouts"):
+                statestore.run(f"DELETE FROM {table} WHERE sub = %s", (sub,))
+            statestore.run("DELETE FROM mcp_sessions WHERE sub = %s", (sub,))
+    needles = [p.rstrip("-") for p in prefixes] + dead_subs
+    notif_rows = statestore.all_rows("SELECT id, doc FROM notifications")
+    dead_n = [nid for nid, n in notif_rows
+              if any(needle in " ".join(str(n.get(f, "")) for f in
+                                        ("title", "detail", "key")).lower()
+                     for needle in needles)]
+    if dead_n:
+        if not dry_run:
+            statestore.run("DELETE FROM notifications WHERE id = ANY(%s)", (dead_n,))
+        removed["notifications"] = [f"{len(dead_n)} notification(s)"]
+    return removed
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--data-dir", default=str(Path(__file__).resolve().parents[1] / "data"))
     ap.add_argument("--prefix", action="append", default=None,
-                    help="artifact name prefix (repeatable; default: pytest-)")
+                    help="artifact name prefix (repeatable; default: pytest-, loadtest-)")
     ap.add_argument("--dry-run", action="store_true", help="report without writing")
+    ap.add_argument("--db", action="store_true",
+                    help="sweep the shared gwstate database (MCP_STATE_DB_URL) instead of files")
     args = ap.parse_args()
+
+    prefixes = tuple(p.lower() for p in (args.prefix or PREFIXES))
+    if args.db:
+        removed = purge_db(prefixes, dry_run=args.dry_run)
+        verb = "would remove" if args.dry_run else "removed"
+        if not removed:
+            print("clean — no test artifacts found in gwstate")
+        for store, items in removed.items():
+            print(f"{store}: {verb} {len(items)} — {', '.join(items[:8])}"
+                  + (" …" if len(items) > 8 else ""))
+        return 0
 
     data_dir = Path(args.data_dir)
     if not data_dir.is_dir():
         print(f"data dir not found: {data_dir}", file=sys.stderr)
         return 2
-    prefixes = tuple(p.lower() for p in (args.prefix or PREFIXES))
 
     removed = purge(data_dir, prefixes, dry_run=args.dry_run)
     verb = "would remove" if args.dry_run else "removed"

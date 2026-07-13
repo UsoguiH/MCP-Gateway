@@ -24,30 +24,71 @@ import json
 import secrets
 import time
 
+from . import statestore
+
 PROTOCOL_VERSION = "2025-11-25"
 SERVER_INFO = {"name": "secure-mcp-gateway", "version": "1.0"}
 _NAME_SEP = "__"
 
-# Ephemeral MCP sessions: sid -> {"sub": user, "created": ts}. In-memory by design —
+# Ephemeral MCP sessions: sid -> {"sub": user, "created": ts}. In-memory by default —
 # sessions are per-connection and cheap to re-establish; a restart just makes clients
-# re-initialize. (Durable state that must survive restart lives in approvals/registry.)
+# re-initialize. Phase 3: with the shared backend on, sessions live in the gwstate DB
+# instead, which is what lets a load balancer route any request of a session to any
+# instance — and lets a node die without dropping a single session.
 _SESSIONS: dict[str, dict] = {}
+_SESSION_IDLE_MAX = 24 * 3600      # DB mode: reap sessions idle this long (sweeper)
+
+
+def _db() -> bool:
+    return statestore.enabled()
 
 
 # ---------- session management (spec: Mcp-Session-Id) ----------
 def new_session(sub: str) -> str:
     sid = secrets.token_urlsafe(32)          # CSPRNG, unguessable
-    _SESSIONS[sid] = {"sub": sub, "created": time.time()}
+    now = time.time()
+    if _db():
+        statestore.run(
+            "INSERT INTO mcp_sessions (sid, sub, created, last_seen) "
+            "VALUES (%s, %s, %s, %s)", (sid, sub, now, now))
+        return sid
+    _SESSIONS[sid] = {"sub": sub, "created": now}
     return sid
 
 
 def session_owner(sid: str) -> str | None:
+    if _db():
+        row = statestore.one(
+            "SELECT sub, last_seen FROM mcp_sessions WHERE sid = %s", (sid,))
+        if not row:
+            return None
+        sub, last_seen = row
+        now = time.time()
+        if now - last_seen > 60:            # throttled activity stamp (feeds the reaper)
+            statestore.run("UPDATE mcp_sessions SET last_seen = %s WHERE sid = %s",
+                           (now, sid))
+        return sub
     s = _SESSIONS.get(sid)
     return s["sub"] if s else None
 
 
 def end_session(sid: str) -> None:
+    if _db():
+        statestore.run("DELETE FROM mcp_sessions WHERE sid = %s", (sid,))
+        return
     _SESSIONS.pop(sid, None)
+
+
+def reap_idle_sessions() -> int:
+    """DB mode only: drop sessions with no activity for _SESSION_IDLE_MAX (the
+    in-memory store dies with the process, so it never needed a reaper). Called
+    from the gateway's background sweeper."""
+    if not _db():
+        return 0
+    rows = statestore.all_rows(
+        "DELETE FROM mcp_sessions WHERE last_seen < %s RETURNING sid",
+        (time.time() - _SESSION_IDLE_MAX,))
+    return len(rows)
 
 
 def sessions_list() -> list[dict]:
@@ -55,6 +96,10 @@ def sessions_list() -> list[dict]:
     Only a 12-char prefix of the session id is exposed (the full id authenticates
     requests to the session); termination matches on that prefix."""
     now = time.time()
+    if _db():
+        return [{"id": sid[:12], "sub": sub, "age_seconds": round(now - created)}
+                for sid, sub, created in statestore.all_rows(
+                    "SELECT sid, sub, created FROM mcp_sessions")]
     return [{"id": sid[:12], "sub": s["sub"], "age_seconds": round(now - s["created"])}
             for sid, s in _SESSIONS.items()]
 
@@ -65,6 +110,13 @@ def terminate(sid_prefix: str) -> dict | None:
     re-runs auth — a revoked/terminated user cannot come back)."""
     if not sid_prefix or len(sid_prefix) < 12:
         return None
+    if _db():
+        # exact prefix match — token_urlsafe ids can contain '_', which is a LIKE
+        # wildcard, so LIKE would be a subtly wrong (if unlikely) match here
+        row = statestore.one(
+            "DELETE FROM mcp_sessions WHERE left(sid, length(%s)) = %s RETURNING sid, sub",
+            (sid_prefix, sid_prefix))
+        return {"id": row[0][:12], "sub": row[1]} if row else None
     for sid in list(_SESSIONS):
         if sid.startswith(sid_prefix):
             s = _SESSIONS.pop(sid)
@@ -74,6 +126,10 @@ def terminate(sid_prefix: str) -> dict | None:
 
 def terminate_for(sub: str) -> int:
     """Admin: kill every live MCP session belonging to a subject."""
+    if _db():
+        rows = statestore.all_rows(
+            "DELETE FROM mcp_sessions WHERE sub = %s RETURNING sid", (sub,))
+        return len(rows)
     dead = [sid for sid, s in _SESSIONS.items() if s["sub"] == sub]
     for sid in dead:
         _SESSIONS.pop(sid, None)

@@ -706,3 +706,108 @@ def test_notifications_legacy_records_still_load(notif, tmp_path):
     assert notif.unread_count("ciadmin") == 1           # the read one stays read
     titles = [n["title"] for n in notif.list_all(sub="ciadmin")]
     assert titles == ["Tool error", "Gateway started"]
+
+
+# ─────────── Phase 3: one backend server must serve many callers at once ────
+def test_calls_to_one_server_run_concurrently(monkeypatch):
+    """Regression (found by the Phase-3 load test): ManagedServer._op held a per-server
+    lock for the WHOLE call, so one backend served exactly one user at a time — 40
+    concurrent sessions queued ~1.6 s behind each other and throughput pinned at ~24
+    calls/s regardless of how many gateway instances ran. MCP is JSON-RPC over one
+    stream (responses match requests by id), so concurrent in-flight calls are fine;
+    only RESTART needs exclusivity."""
+    import asyncio
+    import app.mcp_manager as mm
+
+    srv = mm.ManagedServer("slow", command="python", args=["x.py"])
+    srv.state = "running"
+    inflight, peak = 0, 0
+
+    class FakeSession:
+        async def call_tool(self, tool, args):
+            nonlocal inflight, peak
+            inflight += 1
+            peak = max(peak, inflight)
+            try:
+                await asyncio.sleep(0.05)          # a backend call in flight
+                return type("R", (), {"content": []})()
+            finally:
+                inflight -= 1
+
+    srv.session = FakeSession()
+
+    async def drive():
+        await asyncio.gather(*[srv.call("t", {}) for _ in range(10)])
+
+    asyncio.run(drive())
+    assert peak > 1, "calls to one server are still serialized (peak in-flight = 1)"
+
+
+def test_a_failure_storm_restarts_the_server_once(monkeypatch):
+    """The generation counter must collapse the thundering herd: when a connection dies,
+    the many in-flight calls that fail together restart it ONCE — they must not each tear
+    down the connection the others just rebuilt."""
+    import asyncio
+    import app.mcp_manager as mm
+
+    srv = mm.ManagedServer("flaky", command="python", args=["x.py"])
+    srv.state = "running"
+    restarts = 0
+    dead = True
+
+    class Session:
+        async def call_tool(self, tool, args):
+            if dead:
+                raise ConnectionError("transport closed")
+            return type("R", (), {"content": []})()
+
+    srv.session = Session()
+
+    async def fake_restart():
+        nonlocal restarts, dead
+        restarts += 1
+        await asyncio.sleep(0.01)
+        dead = False                                # the new connection works
+        srv.session = Session()
+
+    monkeypatch.setattr(srv, "_restart", fake_restart)
+
+    async def drive():
+        await asyncio.gather(*[srv.call("t", {}) for _ in range(8)])
+
+    asyncio.run(drive())
+    assert restarts == 1, f"a failure storm restarted the server {restarts}x, expected once"
+
+
+def test_file_chain_append_does_not_rescan_the_whole_log(audit_chain, monkeypatch):
+    """Regression: _last_hash_file() re-read and JSON-parsed the ENTIRE log to find the tip
+    on EVERY append - O(n) per record, O(n^2) over the log's life. At ~10k records a single
+    mediated tool call (two records) took ~7 SECONDS and got slower forever; it was invisible
+    while the dev log was small, so nothing caught it until a load test did.
+
+    Asserted deterministically rather than by a stopwatch: an append must not PARSE the
+    records already in the chain. One append = zero json.loads, however long the chain is.
+    """
+    amod = audit_chain
+    for i in range(300):
+        amod.record("tool_call", user="sara", i=i)
+
+    loads = {"n": 0}
+    real_loads = amod.json.loads
+
+    class CountingJson:
+        dumps = staticmethod(amod.json.dumps)
+
+        @staticmethod
+        def loads(*a, **kw):
+            loads["n"] += 1
+            return real_loads(*a, **kw)
+
+    monkeypatch.setattr(amod, "json", CountingJson)
+    amod.record("tool_call", user="khalid", i=999)          # one append onto a 300-record chain
+    monkeypatch.undo()
+
+    assert loads["n"] == 0, (
+        f"appending one record parsed {loads['n']} existing records - the chain tip is being "
+        "found by re-scanning the whole log (O(n) per append)")
+    assert amod.chain_status(full=True)[0] is True          # and the chain is still sound

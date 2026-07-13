@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 
+from . import statestore
 from .config import DATA_DIR
 
 _FILE = DATA_DIR / "notifications.json"
@@ -27,11 +28,32 @@ _LOCK = threading.Lock()
 _MAX = 300                      # ring buffer: keep the newest N
 
 
+def _db() -> bool:
+    return statestore.enabled()
+
+
 def _load() -> list[dict]:
+    if _db():
+        return [doc for (doc,) in statestore.all_rows(
+            "SELECT doc FROM notifications ORDER BY ts")]
     try:
         return json.loads(_FILE.read_text(encoding="utf-8"))
     except Exception:
         return []
+
+
+def _db_put(n: dict):
+    statestore.run(
+        "INSERT INTO notifications (id, ts, key, doc) VALUES (%s, %s, %s, %s) "
+        "ON CONFLICT (id) DO UPDATE SET ts = EXCLUDED.ts, doc = EXCLUDED.doc",
+        (n["id"], n["ts"], n.get("key"), json.dumps(n, ensure_ascii=False)))
+
+
+def _db_trim():
+    """Ring-buffer semantics: keep the newest _MAX rows."""
+    statestore.run(
+        "DELETE FROM notifications WHERE id IN ("
+        "  SELECT id FROM notifications ORDER BY ts DESC OFFSET %s)", (_MAX,))
 
 
 def _save(items: list[dict]):
@@ -59,6 +81,8 @@ def notify(severity: str, title: str, detail: str = "", source: str = "gateway",
            key: str | None = None) -> dict:
     """Append a notification. If `key` matches an unread notification with the same
     key, bump its count and timestamp instead of stacking duplicates."""
+    if _db():
+        return _notify_db(severity, title, detail, source, key)
     with _LOCK:
         items = _load()
         if key:
@@ -87,6 +111,38 @@ def notify(severity: str, title: str, detail: str = "", source: str = "gateway",
         items.append(n)
         _save(items)
         return n
+
+
+def _notify_db(severity: str, title: str, detail: str, source: str,
+               key: str | None) -> dict:
+    """DB twin of notify(): the key-dedupe read-modify-write runs row-locked, so a
+    burst of the same event across two instances bumps ONE record instead of racing."""
+    with statestore.tx() as cur:
+        if key:
+            row = cur.execute(
+                "SELECT doc FROM notifications WHERE key = %s "
+                "ORDER BY ts DESC LIMIT 1 FOR UPDATE", (key,)).fetchone()
+            if row:
+                n = row[0]
+                n["count"] = n.get("count", 1) + 1
+                n["ts"] = round(time.time(), 3)
+                n["detail"] = detail or n.get("detail", "")
+                n["read_by"] = []
+                n.pop("read", None)
+                n.pop("cleared_by", None)
+                cur.execute("UPDATE notifications SET ts = %s, doc = %s WHERE id = %s",
+                            (n["ts"], json.dumps(n, ensure_ascii=False), n["id"]))
+                return n
+        n = {"id": uuid.uuid4().hex[:12], "ts": round(time.time(), 3),
+             "severity": severity, "title": title, "detail": detail,
+             "source": source, "read_by": [], "count": 1}
+        if key:
+            n["key"] = key
+        cur.execute(
+            "INSERT INTO notifications (id, ts, key, doc) VALUES (%s, %s, %s, %s)",
+            (n["id"], n["ts"], key, json.dumps(n, ensure_ascii=False)))
+    _db_trim()
+    return n
 
 
 def _visible(n: dict, sub: str | None) -> bool:
@@ -130,7 +186,9 @@ def mark_read(ids: list[str] | None = None, mark_all: bool = False,
                 n["read_by"] = sorted(readers)
                 n.pop("read", None)
                 changed += 1
-        if changed:
+                if _db():
+                    _db_put(n)
+        if changed and not _db():
             _save(items)
     return changed
 
@@ -152,7 +210,9 @@ def clear_read(sub: str | None = None) -> int:
             if _is_read_by(n, sub) and sub not in (n.get("cleared_by") or []):
                 n["cleared_by"] = sorted({*(n.get("cleared_by") or []), sub})
                 cleared += 1
-        if cleared:
+                if _db():
+                    _db_put(n)
+        if cleared and not _db():
             _save(items)
     return cleared
 

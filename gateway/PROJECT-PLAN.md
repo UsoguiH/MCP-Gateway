@@ -55,11 +55,13 @@ the single most important sentence an accreditor will read in this document.
 
 ## 3. Where we are: two numbers
 
-- **Work to production ≈ 55%** (was 45% on 2026-07-06). Since then: the client access layer
-  (MCP OAuth 2.1 + Connect-your-AI page), the admin control surface (API keys, OAuth clients,
-  operator lifecycle, server lifecycle, notifications — live-QA-verified 2026-07-09), and the
-  reports connector all shipped. The remaining 45% is dominated by infrastructure (database-
-  backed state, HA) and operations (SIEM, DR, accreditation) — not by control-plane features.
+- **Work to production ≈ 70%** (was 55% on 2026-07-12, 45% on 2026-07-06). Phase 3 closed the
+  single largest gap: state is no longer flat files. The gateway now runs as a **horizontally
+  scalable pair behind a load balancer on a shared PostgreSQL**, killing a node drops zero
+  sessions, and a restore from backup has actually been executed. The remaining 30% is
+  operations and accreditation (SIEM + alert delivery, IR drills, org PKI, pen test, formal
+  sign-off) plus one engineering item: **proving the latency SLO at 300 concurrent on real
+  hardware** (R12).
 - **Plan maturity ≈ 95%** after this revision: the architecture fork is now decided (§2), the
   descope register exists (§11), hygiene/test debt is scheduled (Phase 2), and every phase has
   measurable exit criteria. The last 5% is the open decisions in §9, which only the
@@ -67,10 +69,10 @@ the single most important sentence an accreditor will read in this document.
 
 | Layer | 07-06 | Now | What moved |
 |---|---:|---:|---|
-| Control-plane software (the security engine) | 90% | **95%** | + OAuth 2.1 AS, admin control surface, notifications, and the Phase-2 console/insights/settings layer. Remaining: DB-backed state (Phase 3) |
-| Data connectors (MCP servers) | 55% | **80%** | postgres ✓ gitea ✓ files ✓ reports ✓ opendata ✓. Remaining: scoped Gitea machine token, org system-of-record DB [D2], activate pending files tools |
-| Production infrastructure (TLS/mTLS, secrets, DB, HA) | 20% | **35%** | Prod compose stack live (postgres:17 + nginx mTLS + Docker secrets). Remaining: HA, DB state, org PKI, offsite backups, secret manager |
-| Operations & governance (backups, SIEM, runbooks, sign-off) | 25% | **38%** | Admin console (complete), live QA, backup schedule + backup/cert/disk visibility. Remaining: SIEM, alert delivery, DR drills, IR playbooks, accreditation |
+| Control-plane software (the security engine) | 90% | **98%** | + OAuth 2.1 AS, admin control surface, notifications, the Phase-2 console/insights/settings layer, and the Phase-3 shared-state backend (`statestore.py`). The engine is done |
+| Data connectors (MCP servers) | 55% | **80%** | postgres ✓ gitea ✓ files ✓ reports ✓ opendata ✓ (+ browser/markitdown/qdrant). Remaining: activate the pending tools through the Risk Board |
+| Production infrastructure (TLS/mTLS, secrets, DB, HA) | 20% | **70%** | Prod stack + **HA pair on shared `gwstate` PostgreSQL behind an mTLS LB; node-kill drops zero sessions**. Remaining: org PKI, real offsite target, secret manager, DB redundancy (R11) |
+| Operations & governance (backups, SIEM, runbooks, sign-off) | 25% | **50%** | Admin console, live QA, **executed restore drill (RTO 38.7 s) + the 3 recovery defects it found**, HA/perf runbooks. Remaining: SIEM, alert delivery, IR playbooks, accreditation |
 
 ## 4. What exists today (verified inventory, 2026-07-12)
 
@@ -92,7 +94,7 @@ off; operator lifecycle (create/offboard/role/MFA/reset/sign-out-everywhere) in 
 
 | Server | Tools | Access | Real system | Status |
 |---|---:|---|---|---|
-| postgres-mcp | 83 | R/W | appdb as `mcp_login→mcp_app` (least-priv) | live; org DB awaits [D2] |
+| postgres-mcp | 83 | R/W | appdb as `mcp_login→mcp_app` (least-priv) | live; appdb is the system of record per [D2] (demo scope) |
 | gitea-mcp | 116 | R/W | self-hosted Gitea | live; token is admin-scoped — needs machine account |
 | files-mcp | 6 | RO | `D:\Shares` (3 classified roots, ro-mount) | built + tested; tools pending Risk-Board approval |
 | reports-mcp | 2 | RO→HTML | demo.sales | demo connector |
@@ -143,19 +145,24 @@ back-end + settings overlay, the server-import guard, the artifact purge, live e
 ## 6. What we haven't built yet
 
 **Critical (blocks a real deployment)**
-1. Gateway state in a real database — audit, approvals, registry, credentials, OAuth,
-   operators, notifications are all JSON files with in-process locks; concurrent writes can
-   race and nothing is shareable across instances (also blocks HA).
+1. ~~Gateway state in a real database~~ — **✅ closed by Phase 3 (2026-07-13)**: with
+   `MCP_STATE_DB_URL` set, every durable and runtime store lives in the shared `gwstate`
+   PostgreSQL database, and two instances run behind the LB with no sticky sessions. Flat
+   files remain the dev/test default. R3 (flat-file races capping the pilot at a handful of
+   users) is retired.
 2. Org PKI + real secret custody — dev CA and file secrets everywhere; [D1]/[D7] decide the
    target; the code seams (`*_FILE`, OpenBao provider in `vault.py`) are ready.
-3. Org system-of-record PostgreSQL with a least-privilege service account [D2] — current
-   appdb is our own container.
+3. ~~Org system-of-record PostgreSQL~~ — **closed by [D2] (2026-07-12)**: appdb stays a demo
+   target; no external DB to onboard. The critical item is now the `gwstate` database
+   itself (item 1).
 4. Employee-zero end-to-end proof on a real workstation (login → OAuth → `/mcp` → DLP →
    approval).
 
 **Scale & SecOps (before org-wide rollout)**
-5. High availability — 2+ instances behind a load balancer; shared session/rate/breaker
-   state; load test to 300+ concurrent.
+5. ~~High availability~~ — **✅ built and drilled in Phase 3** (2 instances, shared state,
+   node-kill drops zero sessions). **Still open: the 300-concurrent load run**, which needs
+   real nodes — the commissioning box's ~5 ms database round trip dominates the measurement
+   (Phase 3 task 4).
 6. SIEM integration + alert **delivery** (export stream exists; nothing receives it; the
    notification center is in-dashboard only).
 7. Immutable/WORM audit retention (≥2 years, in-Kingdom per NDMO) + offsite backups + a
@@ -253,9 +260,11 @@ R1–R6 carried forward (renumbered); R7–R10 new this revision.
 2. **R2 — A docs/file-share connector can over-expose.** Mitigated by design (read-only, path
    allow-lists, per-root classification, DLP on results) — but widening the share list is a
    governance act, not a config edit. Keep the Risk-Board gate on every new root.
-3. **R3 — Flat-file state races under concurrency (until Phase 3).** Concurrent writes to
-   audit/approvals/registry JSON can corrupt; caps safe pilot size to a handful of users.
-   **Mitigate:** keep pilot small; the Phase 3 DB migration is the fix.
+3. **R3 — ~~Flat-file state races under concurrency~~ — RETIRED 2026-07-13 (Phase 3).** State
+   moved to the shared `gwstate` PostgreSQL: the audit chain serializes on a database advisory
+   lock (group-committed), approvals vote under row locks, and the registry reconciles under
+   an advisory lock. The pilot cohort is no longer bounded by the store. _New, smaller risk
+   in its place — **R11**._
 4. **R4 — Nobody owns data classification [D4].** DLP masks known PII, but which tables/
    documents are Secret vs Restricted is an org decision. **Mitigate:** appoint a data
    steward; default deny-up until then.
@@ -276,30 +285,58 @@ R1–R6 carried forward (renumbered); R7–R10 new this revision.
    migration, don't discover it.
 10. **R10 — Dashboard fabrications erode operator trust (H4/H5).** An operator who catches one
     fake number stops believing the real ones. Fixed by the Phase 2 truth pass.
+11. **R11 — The state database is now a single point of failure (new, Phase 3).** HA removed
+    the gateway node as a SPOF and concentrated it in `gwstate`: if that database is down,
+    both instances fail closed (`state_ok: false`) and mediated calls stop. This is a
+    deliberate trade — a second shared store (Redis-class) is another thing a 2–4 person team
+    must operate. **Mitigate:** when [D5] delivers hardware, make the *database* redundant
+    first (streaming replica + failover), before adding a third gateway node. Recovery
+    meanwhile is the restore drill (OPERATIONS §5a), RTO measured at 38.7 s.
+12. **R12 — Performance is unproven at 300 concurrent (new, Phase 3).** The SLO (p95 added
+    ≤ 150 ms) is not met on the commissioning box and is not claimed. The dominant term is the
+    database round-trip cost (~5 ms there, ~0.1–0.3 ms on a real node) times ~10–12 round trips
+    per call. **Mitigate:** re-run `scripts/loadtest.py --provision 300` on the Phase-3 nodes;
+    if it still misses, the lever is round-trip *count*, and OPERATIONS §5f-2 records where
+    they go.
 
 ## 9. Decisions we need from the organization
 
 Unchanged asks renumbered D1–D7; D8–D10 new. Each blocks the phase in brackets.
 
+_Status 2026-07-12: **D2, D6, D9, D10 answered; D5 direction set** (recorded below). Still
+open: D1 (PKI), D3 (document shares), D4 (data steward), D7 (HSM), D8 (R1 signer) — D1 has
+the longest lead time; ask it first._
+
 - **[D1 / P-6, answer early]** Which CA/PKI issues certificates (server + per-workstation
   client certs)? The dev CA can carry the pilot; the swap lands in Phase 6, but certificate
   issuance has lead time — answer during Phase 2–3.
-- **[D2 / P-3]** Which PostgreSQL is the real system-of-record, and can we get a dedicated
-  least-privilege service account?
+- **[D2 / P-3 — ✅ answered 2026-07-12]** Gateway state (audit, approvals, registry,
+  operators, OAuth, keys) migrates to a **real PostgreSQL**: a new dedicated `gwstate`
+  database + least-privilege role in the prod postgres:17 instance. There is **no external
+  org system-of-record to onboard** — appdb stays a demo connector target. Re-opens only if
+  a real org database appears (then: dedicated least-priv service account).
 - **[D3 / P-5]** Where do internal documents actually live — SMB shares, SharePoint, NFS, DMS?
   (Demo runs on `D:\Shares`; the answer gates pointing files-mcp at real shares for the pilot.)
 - **[D4 / P-5]** Who owns data classification (which tables/documents are which sensitivity)?
   Gates widening any share or table exposure beyond the demo roots (see R4).
-- **[D5 / P-3]** What hardware for HA — 2+ Linux nodes + load balancer; later a DR site?
-- **[D6 / P-4]** Which SIEM receives the audit stream — Wazuh, OpenSearch, Splunk, Sentinel?
+- **[D5 / P-3 — direction set 2026-07-12]** Hardware unknown for now; the binding
+  requirement is **design for horizontal scale**: stateless gateway processes, all state
+  externalized, Linux-portable containers, LB-ready. Node count is a deploy-time variable —
+  prove the design with 2 replicas behind nginx on the current host; procure real nodes and
+  a DR site when they exist.
+- **[D6 / P-4 — ✅ answered 2026-07-12]** **Wazuh, self-hosted on-prem** (Docker stack
+  alongside the gateway). Whether the org already runs a SIEM is unknown — if one surfaces,
+  the standard JSONL export re-points at it cheaply; Wazuh remains the reference target.
 - **[D7 / P-6]** Is an HSM required for key custody, or is a software secret store acceptable
   at launch? (Note: if the org classifies this system under NCS-1:2020 ADVANCED, software-only
   signing keys are not permitted — the answer may not be optional.)
 - **[D8 / P-6]** Formal written acceptance of R1 (BYO-AI residual risk) — who signs it?
-- **[D9 / P-2]** Console session policy — TTL/idle timeout values and whether a pre-expiry
-  warning is required.
-- **[D10 / P-4]** Alert delivery channel for security notifications — SMTP relay, webhook to
-  an existing chat/ticket system, or SIEM-native alerting only?
+- **[D9 / P-2 — ✅ closed by Phase 2 task 5]** Shipped as configurable TTL + idle timeout +
+  2-minute expiry warning; current defaults stand until an org policy says otherwise.
+- **[D10 / P-4 — ✅ answered 2026-07-12]** All three surfaces: **chat webhook (primary) +
+  SMTP email + in-dashboard**. Phase 4 task 2 builds webhook and SMTP delivery; the concrete
+  webhook target (Telegram/Teams/Slack/Mattermost) and the SMTP relay account are config
+  values supplied at deploy time.
 
 _Staffing note: if NCA ECC-2:2024 applies to this system, cybersecurity roles must be filled
 by qualified Saudi nationals — a hiring constraint to surface alongside [D8], not a build item._
@@ -450,41 +487,75 @@ the cohort while state is flat-file) and let them work in parallel with Phases 3
 latency, approval-friction, and DLP observations become the Phase 5 tuning baseline — real-user
 learning should not wait for HA._
 
-### Phase 3 — State & scale (L, was old Phase 2)
+### Phase 3 — State & scale (L, was old Phase 2) — **✅ SUBSTANTIALLY COMPLETE 2026-07-13**
 _Goal: the gateway survives concurrency, restarts, and node loss at 300-user scale._
 
-Tasks:
-1. **State migration to PostgreSQL** (the big one): audit chain, approvals, registry,
-   credentials/operators, OAuth clients/refresh, API keys, notifications, kill-switch/drain
-   state move from JSON files to the DB behind the existing store interfaces; flat-file
-   backend retained as the dev/test default; one-shot migration tool + rollback procedure;
-   keep the HMAC hash chain intact across the move.
-2. Shared runtime state for multi-instance: sessions, rate-limit windows, circuit-breaker
-   state, OAuth codes, vault leases, taint sets, lockout counters, JWT replay cache, and
-   **approval executed results** (today an approved call's result dies with a restart —
-   a user-visible bug, fix regardless of HA) — DB or Redis-class store ([D5] informs); or an
-   explicit sticky-session design decision documented.
-3. HA: 2+ gateway instances behind a load balancer (nginx upstream or the org's LB); config
-   for instance identity; health-based ejection. Target OS: Linux nodes (retire R9
-   Windows couplings: shares mount path, Gitea address, backup scheduling).
-4. Load test: `scripts/loadtest.py` to 300+ concurrent sessions; record PEP overhead
-   (target: p95 added latency ≤ 150 ms per mediated call); tune limits/timeouts/breaker.
-5. Offsite/second-site backups + log rotation & disk-capacity runbook.
+**Status: tasks 1, 2, 3, 5 complete and verified on live infrastructure; task 4 (the
+300-session load run) is deferred to real hardware — see the honest caveat below.** Suite:
+**340 tests green** (was 305), including a new shared-state suite driven against a real
+PostgreSQL.
 
-→ _Done when: 300 concurrent sessions sustained within the latency budget, killing one
-gateway node drops zero sessions, restarting everything loses zero durable state, and a
-restore from offsite backup has been executed once._
+Tasks:
+1. **✅ State migration to PostgreSQL** — `app/statestore.py` is the seam: with
+   `MCP_STATE_DB_URL` set, the audit chain, approvals (+ **executed results**), registry,
+   operators/credentials/MFA, OAuth clients + refresh, API keys, notifications, containment
+   and settings live in the shared `gwstate` database; unset, every store keeps its original
+   flat-file behaviour (the zero-setup dev/test default). **Fail-closed:** a set-but-
+   unreachable database refuses to boot rather than silently running on per-instance files.
+   `scripts/migrate_state.py` migrates and rolls back, verifying the HMAC chain **before and
+   after** — rollback reproduces a byte-identical, independently verifiable JSONL.
+   *Executed for real:* 274 live audit records + 211 registry entries migrated, chain intact.
+2. **✅ Shared runtime state** — sessions, rate-limit windows, breaker, taint, OAuth codes,
+   lockouts, JWT revocations and vault leases are shared UNLOGGED rows (no WAL cost;
+   everything in them is re-establishable by design). **The approval-result bug is fixed**:
+   an approved call's result is now durable, so it survives a restart. No Redis — one
+   database is one thing for a 2–4 person team to operate ([D5]).
+3. **✅ HA** — `docker-compose.ha.yml`: two instances behind the mTLS nginx LB with passive
+   health ejection and **no sticky sessions** (any instance serves any session). Every
+   response carries `X-Gateway-Instance`. *Drilled live:* an operator created on gw-a signs in
+   through gw-b; one MCP session is served by both; **`docker kill` of an instance mid-session
+   dropped zero sessions (12/12 calls, zero errors)**; a kill switch engaged on one instance
+   blocks on the other.
+4. **⚠️ Load test — harness built, 300-session run deferred to real hardware.**
+   `scripts/loadtest.py --provision 300` provisions N real operators, opens N MCP sessions and
+   paces them. **Profiling it found and fixed four serious performance bugs** (see
+   OPERATIONS §5f-2): secrets re-read from the mount on every hot-path call (2.7 ms each);
+   the token-signing key's PEM decrypted per request; a TTL cache that stampeded on expiry
+   (`tools/list` measured **17 s** at p50 under 40 clients); and the audit chain holding its
+   global lock across a commit (now group-committed). Result: `tools/call` p50 **1564 → 251 ms**
+   and throughput **22 → 112 req/s**; `tools/list` **17,021 → 246 ms**.
+   **The p95 ≤ 150 ms SLO is NOT yet met and is not claimed:** measured p95 is ~650 ms at 7
+   sessions on the commissioning box, where a single database round trip costs ~5 ms (Docker
+   Desktop on Windows). Added latency ≈ round-trips × round-trip-cost, and the gateway makes
+   ~10–12 per call; on a Linux node with a local PostgreSQL (~0.1–0.3 ms/round trip) the same
+   code path is 20–50× cheaper. **Re-run on the Phase-3 nodes when [D5] delivers them** — that
+   is the environment the SLO was written for.
+5. **✅ Backups + restore drill** — `backup.ps1` now dumps `gwstate` and the per-instance HA
+   volumes, and `scripts/restore_drill.ps1` restores a backup into a throwaway server and
+   **proves the restored audit chain verifies from genesis**. *Executed 2026-07-13: PASS,
+   RTO 38.7 s, chain intact over 8,233 records.* The first run found **three defects that
+   would each have broken a real recovery**: the backup did not include cluster roles (so it
+   would not restore at all), restoring globals silently resets the superuser password, and a
+   restored chain is unverifiable without its separately-held HMAC key. All three are fixed
+   and written up in OPERATIONS §5a.
+
+→ _Done when: 300 concurrent sessions sustained within the latency budget **(OPEN — needs real
+nodes)**; killing one gateway node drops zero sessions **(✅ drilled)**; restarting everything
+loses zero durable state **(✅ — state is in the DB)**; and a restore from backup has been
+executed once **(✅ 2026-07-13, RTO 38.7 s)**._
 
 ### Phase 4 — See & respond: SecOps (M, was old Phase 3)
 _Goal: an attack shows up as an alert a human actually receives, and the team has rehearsed
 the response._
 
 Tasks:
-1. SIEM integration [D6]: point the export stream at the chosen SIEM; ship a **detection
+1. SIEM integration [D6 = self-hosted Wazuh]: deploy the Wazuh stack (Docker, on-prem
+   beside the gateway) and point the export stream at it; ship a **detection
    content pack** (brute-force, first-tool-use, sequence/volume anomalies, tool drift,
    approval-SLA breach, kill-switch engagement, quarantine events); surface SIEM export
    consumer health in the console self-page (A25).
-2. Alert **delivery** [D10] (A1): email/webhook channel for critical notifications; on-call
+2. Alert **delivery** [D10 = chat webhook + SMTP + dashboard] (A1): webhook and SMTP
+   channels for critical notifications; on-call
    escalation note in OPERATIONS.md.
 3. Audit retention: immutable/WORM store, ≥2-year in-Kingdom retention (NDMO); retention/
    pruning for operational stores.
@@ -584,14 +655,25 @@ trigger that would put it back on the roadmap.
 
 ## 13. Do now (next two weeks)
 
-1. **Employee-zero smoke test** on a real client machine — the one unproven step of the core
-   promise (Phase 2, task 10).
-2. **Console governance sweep** — approve files-mcp tools, action the two quarantined
-   opendata tools, purge `pytest-*` artifacts (Phase 2, tasks 2 & 9).
-3. **Commit the pending `ADMIN-CONTROLS.md`, delete the stray `main.js` and the TOTP QR
-   images,** rotate the exposed OpenRouter key and move `MCP_APP_PASSWORD` to
-   `deploy/secrets/` (Phase 2, task 1 — under an hour of hygiene).
-4. **Scoped Gitea machine token** (Phase 2, task 6).
-5. Start the **dashboard truth pass** (Phase 2, task 3).
-6. Take **[D2] and [D6]** to the organization — the two decisions with the longest lead
-   times ahead of Phases 3–4.
+_Rewritten 2026-07-13 after Phase 3 landed (state migration, HA, restore drill). The previous
+lists are in git history — all items completed._
+
+1. **Start the mini-pilot — the blocker is gone.** R3 (flat-file races) capped the cohort at a
+   handful of users; state is now in `gwstate` and the pair survives a node kill. Onboard the
+   first friendly users on `docker-compose.ha.yml`. Their latency and approval-friction
+   observations seed Phase 5.
+2. **Point `scripts/backup.ps1 -Offsite` at a real NAS/second disk**, then run
+   `scripts/restore_drill.ps1 -From <that path>`. The drill passes locally (RTO 38.7 s); the
+   one thing still missing is a destination that survives losing this machine.
+3. **Approve the pending tools through the Risk Board.** 230 of 235 registry entries are
+   `pending` — correct production governance, but it means the connectors are effectively
+   inert. Work the queue with the schema-view + tier controls in the console.
+4. **Take [D1] (org PKI) to the organization — longest lead time.** Concretely: the dev CA
+   carries no `keyUsage` extension, so strict TLS clients refuse to verify it (found while
+   drilling HA). That is a Phase-6 swap, but certificate issuance has lead time — ask now.
+5. Take the remaining decisions: **[D3] document shares, [D4] data steward, [D7] HSM,
+   [D8] R1 signer.** Confirm whether the org already runs a SIEM (Wazuh is the build target
+   either way, per [D6]).
+6. **When [D5] delivers hardware:** re-run `scripts/loadtest.py --provision 300` on real
+   Linux nodes to close R12, and make the *state database* redundant before adding a third
+   gateway node (R11).

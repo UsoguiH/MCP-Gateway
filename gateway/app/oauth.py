@@ -38,7 +38,7 @@ import threading
 import time
 import uuid
 
-from . import auth
+from . import auth, statestore
 from .config import CONFIG, DATA_DIR
 
 _A = CONFIG["auth"]
@@ -57,11 +57,19 @@ _refresh: dict[str, dict] = {}        # sha256(refresh) -> {sub, client_id, scop
 
 
 # --------------------------------------------------------------------------
-# persistence
+# persistence — flat files by default; the shared gwstate DB in Phase-3 mode
+# (an employee authorizes once and every gateway instance honours the client,
+# the refresh rotation, and the single-use code — wherever the LB routes them).
 # --------------------------------------------------------------------------
+
+def _db() -> bool:
+    return statestore.enabled()
+
 
 def _load():
     global _clients, _refresh
+    if _db():
+        return                                   # DB mode reads rows per call
     if _CLIENTS_FILE.exists():
         try:
             _clients = json.loads(_CLIENTS_FILE.read_text(encoding="utf-8"))
@@ -205,14 +213,28 @@ def register_client(payload: dict) -> dict:
         "response_types": ["code"],
         "created": now,
     }
-    with _lock:
-        _clients[client_id] = rec
-        _save_clients()
+    if _db():
+        _put_client(rec)
+    else:
+        with _lock:
+            _clients[client_id] = rec
+            _save_clients()
     # RFC 7591 response echoes the registration.
     return {**rec, "client_id_issued_at": now}
 
 
+def _put_client(rec: dict):
+    statestore.run(
+        "INSERT INTO oauth_clients (client_id, doc) VALUES (%s, %s) "
+        "ON CONFLICT (client_id) DO UPDATE SET doc = EXCLUDED.doc",
+        (rec["client_id"], json.dumps(rec, ensure_ascii=False)))
+
+
 def get_client(client_id: str) -> dict | None:
+    if _db():
+        row = statestore.one("SELECT doc FROM oauth_clients WHERE client_id = %s",
+                             (client_id,))
+        return row[0] if row else None
     return _clients.get(client_id)
 
 
@@ -223,23 +245,31 @@ def get_client(client_id: str) -> dict | None:
 def list_clients() -> list[dict]:
     """Registered OAuth clients with live refresh-token counts and the subjects
     that authorized them — the admin's view of who can reach /mcp via OAuth."""
-    with _lock:
-        _gc_refresh()
-        by_client: dict[str, list[dict]] = {}
-        for rec in _refresh.values():
-            by_client.setdefault(rec["client_id"], []).append(rec)
-        out = []
-        for cid, c in _clients.items():
-            toks = by_client.get(cid, [])
-            out.append({
-                "client_id": cid,
-                "client_name": c.get("client_name", ""),
-                "redirect_uris": c.get("redirect_uris", []),
-                "created": c.get("created"),
-                "last_used": c.get("last_used"),
-                "active_refresh_tokens": len(toks),
-                "subjects": sorted({t["sub"] for t in toks}),
-            })
+    if _db():
+        statestore.run("DELETE FROM oauth_refresh WHERE exp < %s", (time.time(),))
+        clients = {cid: doc for cid, doc in
+                   statestore.all_rows("SELECT client_id, doc FROM oauth_clients")}
+        refresh = [doc for (doc,) in statestore.all_rows("SELECT doc FROM oauth_refresh")]
+    else:
+        with _lock:
+            _gc_refresh()
+            clients = dict(_clients)
+            refresh = list(_refresh.values())
+    by_client: dict[str, list[dict]] = {}
+    for rec in refresh:
+        by_client.setdefault(rec["client_id"], []).append(rec)
+    out = []
+    for cid, c in clients.items():
+        toks = by_client.get(cid, [])
+        out.append({
+            "client_id": cid,
+            "client_name": c.get("client_name", ""),
+            "redirect_uris": c.get("redirect_uris", []),
+            "created": c.get("created"),
+            "last_used": c.get("last_used"),
+            "active_refresh_tokens": len(toks),
+            "subjects": sorted({t["sub"] for t in toks}),
+        })
     out.sort(key=lambda x: x.get("created") or 0, reverse=True)
     return out
 
@@ -248,6 +278,15 @@ def revoke_client(client_id: str) -> dict | None:
     """Delete a client registration and every refresh token it holds. Outstanding
     access tokens (<=1h) expire on their own; nothing can be renewed. Returns the
     removed client record, or None if unknown."""
+    if _db():
+        row = statestore.one(
+            "DELETE FROM oauth_clients WHERE client_id = %s RETURNING doc", (client_id,))
+        if not row:
+            return None
+        dead = statestore.all_rows(
+            "DELETE FROM oauth_refresh WHERE doc->>'client_id' = %s RETURNING token_hash",
+            (client_id,))
+        return {**row[0], "refresh_tokens_revoked": len(dead)}
     with _lock:
         c = _clients.pop(client_id, None)
         if c is None:
@@ -263,6 +302,10 @@ def revoke_client(client_id: str) -> dict | None:
 
 def revoke_refresh_for_sub(sub: str) -> int:
     """Kill every refresh token a subject holds (the 'sign out everywhere' path)."""
+    if _db():
+        dead = statestore.all_rows(
+            "DELETE FROM oauth_refresh WHERE doc->>'sub' = %s RETURNING token_hash", (sub,))
+        return len(dead)
     with _lock:
         dead = [k for k, v in _refresh.items() if v.get("sub") == sub]
         for k in dead:
@@ -279,20 +322,35 @@ def revoke_refresh_for_sub(sub: str) -> int:
 def create_authorization_code(client_id: str, redirect_uri: str, code_challenge: str,
                               sub: str, scope: str) -> str:
     code = secrets.token_urlsafe(32)
+    rec = {
+        "client_id": client_id, "redirect_uri": redirect_uri,
+        "challenge": code_challenge, "sub": sub, "scope": scope,
+        "exp": time.time() + _CODE_TTL,
+    }
+    if _db():
+        # Stored hashed (defence in depth) and shared: the browser step may land on
+        # instance A while the client exchanges the code on instance B.
+        statestore.run("DELETE FROM oauth_codes WHERE exp < %s", (time.time(),))
+        statestore.run(
+            "INSERT INTO oauth_codes (code_hash, exp, doc) VALUES (%s, %s, %s)",
+            (_sha256_hex(code), rec["exp"], json.dumps(rec, ensure_ascii=False)))
+        return code
     with _lock:
         _gc_codes()
-        _codes[code] = {
-            "client_id": client_id, "redirect_uri": redirect_uri,
-            "challenge": code_challenge, "sub": sub, "scope": scope,
-            "exp": time.time() + _CODE_TTL,
-        }
+        _codes[code] = rec
     return code
 
 
 def _consume_code(code: str, client_id: str, redirect_uri: str) -> dict:
-    with _lock:
-        _gc_codes()
-        rec = _codes.pop(code, None)          # single-use: pop regardless
+    if _db():
+        row = statestore.one(
+            "DELETE FROM oauth_codes WHERE code_hash = %s AND exp > %s RETURNING doc",
+            (_sha256_hex(code), time.time()))     # atomic single-use across instances
+        rec = row[0] if row else None
+    else:
+        with _lock:
+            _gc_codes()
+            rec = _codes.pop(code, None)          # single-use: pop regardless
     if not rec:
         raise OAuthError("invalid_grant", "authorization code invalid, expired, or already used")
     if rec["client_id"] != client_id or rec["redirect_uri"] != redirect_uri:
@@ -306,23 +364,33 @@ def _consume_code(code: str, client_id: str, redirect_uri: str) -> dict:
 
 def _issue_refresh(sub: str, client_id: str, scope: str) -> str:
     token = secrets.token_urlsafe(40)
+    rec = {"sub": sub, "client_id": client_id, "scope": scope,
+           "exp": time.time() + _REFRESH_TTL}
+    if _db():
+        statestore.run(
+            "INSERT INTO oauth_refresh (token_hash, exp, doc) VALUES (%s, %s, %s)",
+            (_sha256_hex(token), rec["exp"], json.dumps(rec, ensure_ascii=False)))
+        return token
     with _lock:
         _gc_refresh()
-        _refresh[_sha256_hex(token)] = {
-            "sub": sub, "client_id": client_id, "scope": scope,
-            "exp": time.time() + _REFRESH_TTL,
-        }
+        _refresh[_sha256_hex(token)] = rec
         _save_refresh()
     return token
 
 
 def _rotate_refresh(refresh_token: str, client_id: str) -> dict:
     key = _sha256_hex(refresh_token)
-    with _lock:
-        _gc_refresh()
-        rec = _refresh.pop(key, None)          # rotation: old token dies now
-        if rec:
-            _save_refresh()
+    if _db():
+        row = statestore.one(
+            "DELETE FROM oauth_refresh WHERE token_hash = %s AND exp > %s RETURNING doc",
+            (key, time.time()))                # atomic rotation: a replay finds no row
+        rec = row[0] if row else None
+    else:
+        with _lock:
+            _gc_refresh()
+            rec = _refresh.pop(key, None)      # rotation: old token dies now
+            if rec:
+                _save_refresh()
     if not rec:
         raise OAuthError("invalid_grant", "refresh token invalid, expired, or already used")
     if rec["client_id"] != client_id:
@@ -337,11 +405,17 @@ def _rotate_refresh(refresh_token: str, client_id: str) -> dict:
 def _touch_client(client_id: str):
     """Stamp last-use on a client (A21) so an admin can spot a dead registration that
     should be revoked — or one that suddenly woke up after six months."""
+    now = int(time.time())
+    if _db():
+        c = get_client(client_id)
+        if c and now - int(c.get("last_used") or 0) > 60:  # throttle the write
+            c["last_used"] = now
+            _put_client(c)
+        return
     with _lock:
         c = _clients.get(client_id)
         if not c:
             return
-        now = int(time.time())
         if now - int(c.get("last_used") or 0) > 60:       # throttle the disk write
             c["last_used"] = now
             _save_clients()

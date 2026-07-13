@@ -16,12 +16,16 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 
+from . import statestore
 from .config import CONFIG, DATA_DIR, GATEWAY, POLICY
 
 _FILE = DATA_DIR / "settings.json"
 _LOCK = threading.Lock()
 _overrides: dict = {}
+_db_loaded_at = 0.0        # TTL on the DB read: an admin's change on one instance
+_DB_TTL = 2.0              # is enforced on every other instance within ~2 s
 
 _APPROVALS = CONFIG.get("approvals", {}) or {}
 _AUTH = CONFIG.get("auth", {}) or {}
@@ -90,14 +94,26 @@ class SettingsError(ValueError):
 
 
 def _load():
-    global _overrides
+    global _overrides, _db_loaded_at
+    if statestore.enabled():
+        _overrides = {section: doc for section, doc in
+                      statestore.all_rows("SELECT section, doc FROM settings")}
+        _db_loaded_at = time.monotonic()
+        return
     try:
         _overrides = json.loads(_FILE.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         _overrides = {}
 
 
+def _refresh():
+    """DB mode: pick up overrides written by other instances (TTL-bounded)."""
+    if statestore.enabled() and time.monotonic() - _db_loaded_at >= _DB_TTL:
+        _load()
+
+
 def _save():
+    # file mode only: DB mode writes per-section at the call sites (update/reset)
     _FILE.write_text(json.dumps(_overrides, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
@@ -114,12 +130,14 @@ def _merge(base: dict, over: dict) -> dict:
 def effective() -> dict:
     """Defaults merged with persisted overrides — what the gateway actually enforces."""
     with _LOCK:
+        _refresh()
         return _merge(_defaults(), _overrides)
 
 
 def overrides() -> dict:
     """Only the values an admin has changed (what makes this deployment non-default)."""
     with _LOCK:
+        _refresh()
         return json.loads(json.dumps(_overrides))
 
 
@@ -198,6 +216,7 @@ def update(section: str, patch: dict) -> dict:
             clean[key] = _coerce(section, key, value, default)
 
     with _LOCK:
+        _refresh()
         cur = dict(_overrides.get(section, {}))
         for k, v in clean.items():
             if isinstance(v, dict) and isinstance(cur.get(k), dict):
@@ -205,7 +224,13 @@ def update(section: str, patch: dict) -> dict:
             else:
                 cur[k] = v
         _overrides[section] = cur
-        _save()
+        if statestore.enabled():               # write ONLY the touched section: an
+            statestore.run(                    # all-section save could clobber another
+                "INSERT INTO settings (section, doc) VALUES (%s, %s) "   # instance's
+                "ON CONFLICT (section) DO UPDATE SET doc = EXCLUDED.doc",  # fresh write
+                (section, json.dumps(cur, ensure_ascii=False)))
+        else:
+            _save()
     return effective()[section]
 
 
@@ -214,11 +239,16 @@ def reset(section: str | None = None) -> dict:
     with _LOCK:
         if section is None:
             _overrides.clear()
+            if statestore.enabled():
+                statestore.run("DELETE FROM settings")
         else:
             if section not in _defaults():
                 raise SettingsError(f"unknown settings section '{section}'")
             _overrides.pop(section, None)
-        _save()
+            if statestore.enabled():
+                statestore.run("DELETE FROM settings WHERE section = %s", (section,))
+        if not statestore.enabled():
+            _save()
     return effective()
 
 

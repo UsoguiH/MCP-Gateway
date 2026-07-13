@@ -1,0 +1,206 @@
+# MCP Gateway — PRODUCTION configuration (mounted over the baked-in config.yaml
+# by docker-compose.ha.yml / docker-compose.prod.yml).
+#
+# Differences from config.yaml (the dev/test default): the docs/actions pilot
+# fixtures are NOT registered (the MCP_ENV=production tripwire refuses to boot
+# with them), and the out-of-tree opendata connector is left to runtime
+# onboarding. Everything else is kept in lockstep with config.yaml.
+
+# NOTE: the gateway runs NO model. Inference is client-side — each colleague's own
+# local LLM (or a brokered confidential-compute GPU) connects to the inbound MCP
+# endpoint (POST /mcp) and drives tools through the control pipeline. There is no
+# llm.* block: the gateway is a pure Policy Enforcement Point / MCP router.
+
+auth:
+  # TPM-bound certificate authentication (redesign plan §1-3). No shared secret,
+  # no passwords. Session tokens are ES256-signed and bound to the client cert.
+  # PRODUCTION SWAP POINTS: signing key -> OpenBao Transit/HSM; IdP -> Keycloak +
+  # AD/LDAP X.509 CBA; thumbprint header -> injected by the mTLS-terminating sidecar.
+  mode: "builtin"                            # builtin (TPM+PIN, dev) | oidc (external Keycloak)
+  issuer: "https://gateway.internal/idp"    # token issuer identity
+  audience: "mcp-gateway"                    # tokens are scoped to this gateway
+  alg: "ES256"                               # ECDSA P-256 (not EdDSA; NCA NCS-1:2020)
+  # Production auth: point at a self-hosted Keycloak realm; the gateway becomes a
+  # Resource Server validating its JWTs (no token minting). Set mode: oidc.
+  oidc:
+    jwks_url: "https://keycloak.internal/realms/gov/protocol/openid-connect/certs"
+    issuer: "https://keycloak.internal/realms/gov"
+    audience: "mcp-gateway"
+    algorithms: ["RS256", "ES256"]
+    role_claim: "role"
+    clearance_claim: "clearance"
+    name_claim: "name"
+  access_ttl_seconds: 600                    # short-lived session token (10 min)
+  challenge_ttl_seconds: 120                 # login challenge validity
+  clock_skew_seconds: 30
+  aal: "aal2"                                # assurance level asserted in the token acr
+  lockout_threshold: 5                       # failed logins before lockout (TPM anti-hammering)
+  lockout_seconds: 60                        # short cooldown so a lockout-DoS self-heals fast (M1)
+  step_up_max_age_seconds: 300               # Tier-3 approval needs auth this fresh
+  login_rate_per_minute: 120                 # per-IP throttle on auth endpoints (M1/M5); tighten in prod
+  max_request_bytes: 65536                   # reject oversized request bodies (M3)
+  pki_dir: "pki"                             # dev CA + signing key + PIN-sealed user certs
+  dev_login_enabled: false                   # DEV path disabled: production username+password login only
+  # Production sign-in: username + strong password (salted PBKDF2, hashes in
+  # data/credentials.json). MFA is a TOTP layer on top — set require_mfa: true to
+  # enforce the authenticator step (operators enrol their own authenticator app).
+  require_mfa: true                          # ENFORCED: password + TOTP authenticator (RFC 6238)
+  dev_quick_login: false                     # DEV ONLY: dashboard "Enter now" button skips
+                                             # password+MFA and opens as admin. OFF in production.
+  pbkdf2_iterations: 600000                  # OWASP 2024 floor for PBKDF2-HMAC-SHA256
+  password_max_age_days: 90                   # force rotation after this many days (0 = never)
+  # Origin allow-list for the DNS-rebinding defense (MCP spec MUST). Real default
+  # (not "*") so the guard is active; add your gateway origins in production.
+  allowed_origins: ["http://127.0.0.1:8800", "http://localhost:8800",
+                    "https://localhost:8443", "https://gateway.internal:8443",
+                    "http://host.docker.internal:8800"]   # dev: dockerized browser QA
+  # Trusted-proxy enforcement (production). When enabled the gateway refuses any
+  # /api or /mcp request that does not carry the shared secret the mTLS terminator
+  # injects — so the app can never be reached directly, bypassing TLS + client-cert
+  # verification. Supply the secret via MCP_PROXY_SHARED_SECRET(_FILE); the nginx
+  # config in deploy/nginx.conf sets the matching header. Enable in production
+  # (docker-compose.tls.yml wires the whole path); dev over loopback leaves it off.
+  trusted_proxy:
+    enabled: false
+    header: "x-proxy-auth"
+    shared_secret: ""            # prefer MCP_PROXY_SHARED_SECRET_FILE (Docker secret)
+
+  # OAuth 2.1 authorization server for MCP clients (app/oauth.py). Fronts the
+  # password+MFA login with the standard authorization-code + PKCE flow so any
+  # spec-compliant local-AI client (Claude Code, etc.) self-onboards like it does
+  # for any hosted MCP server. Access tokens here are bearer (not cert-bound) and
+  # rely on PKCE + short TTL + rotated refresh + revocation over the mTLS channel.
+  oauth:
+    access_ttl_seconds: 3600            # OAuth access token lifetime (refresh renews)
+    refresh_ttl_seconds: 2592000        # refresh token lifetime (30 days), rotated per use
+    code_ttl_seconds: 60                # authorization code validity (single-use)
+    manual_token_ttl_seconds: 28800     # "Connect your AI" manual paste-in token (8h)
+
+# HITL approval lifecycle: a request nobody approves within pending_ttl_hours
+# auto-expires (stale destructive actions must not be rubber-stampable later);
+# resolved entries are kept retention_hours so the requester can fetch the
+# result, then pruned so approvals.json cannot grow without bound.
+approvals:
+  pending_ttl_hours: 24
+  retention_hours: 72
+
+gateway:
+  host: "127.0.0.1"
+  port: 8800
+  max_tool_result_bytes: 262144        # protocol hardening: size limit on tool results
+  max_arg_string_len: 20000            # size limit on any single tool argument
+  rate_limit_calls_per_minute: 30      # per-user tool-call budget
+  rate_limit_per_tool_per_minute: 10   # per-(user,tool) budget (tight on costly/destructive ops)
+  rate_limit_per_server_per_minute: 60 # per-server budget (contain one compromised server)
+  taint_min_len: 12                    # min substring length considered for taint matching
+  breaker_failure_threshold: 5         # consecutive server failures before the circuit opens
+  breaker_cooldown_seconds: 30         # how long a tripped server stays quarantined
+
+# Per-backend dynamic credentials injected at dispatch (never in model context).
+# PRODUCTION SWAP POINT: OpenBao dynamic DB credentials via hvac; keys in HSM.
+vault:
+  actions:                             # the write-action server gets per-call creds
+    ttl_seconds: 300
+
+# Audit / SIEM. PRODUCTION SWAP POINT: point the SIEM stream at Wazuh/OpenSearch.
+audit:
+  siem_export: true                    # mirror every audit event to the SIEM feed
+  siem_stream: "siem_stream.jsonl"
+
+# Tool onboarding governance. Dev auto-activates new tools; production requires a
+# Risk-Board approval before a newly-discovered tool is callable.
+registry:
+  require_approval: true               # Risk-Board gate: newly discovered tools land
+                                       # 'pending' and are NOT callable until an admin
+                                       # approves them (POST .../approve). Already-onboarded
+                                       # tools keep their status; this gates future drift.
+
+servers:
+  # Production servers. env values support ${VAR} expansion from the gateway's
+  # own environment so secrets never live in this file. Both servers connect
+  # lazily: with the env unset they still boot and register their tools, and
+  # each call returns a clean structured error instead of crashing.
+  - name: postgres
+    command: python
+    args: ["servers/postgres_server.py"]
+    env:
+      POSTGRES_URL: "${POSTGRES_URL}"            # postgresql://user:pass@host:5432/db
+      POSTGRES_ROLE: "${POSTGRES_ROLE}"          # SET ROLE to this least-privilege role at connect
+      POSTGRES_APPNAME: "${POSTGRES_APPNAME}"    # tags the connection in pg_stat_activity
+      POSTGRES_STATEMENT_TIMEOUT_MS: "30000"
+      POSTGRES_MAX_ROWS: "500"
+      POSTGRES_ALLOW_DANGEROUS: "0"              # 1 unlocks drop_database/terminate_backend
+  - name: gitea
+    command: python
+    args: ["servers/gitea_server.py"]
+    env:
+      GITEA_URL: "${GITEA_URL}"                  # e.g. http://localhost:3000
+      GITEA_TOKEN: "${GITEA_TOKEN}"              # personal access token
+      GITEA_TOKEN_FILE: "${GITEA_TOKEN_FILE}"    # or a Docker secret file (wins)
+  - name: reports
+    command: python
+    args: ["servers/reports_server.py"]
+    env:
+      POSTGRES_URL: "${POSTGRES_URL}"           # same DB the postgres server reads
+      REPORTS_DIR: "data/reports"
+  - name: files
+    command: python
+    args: ["servers/files_server.py"]
+    env:
+      # JSON array of allow-listed document roots (read-only server):
+      #   [{"name":"policies","path":"/shares/policies","classification":"restricted"}]
+      DOCS_ROOTS: "${DOCS_ROOTS}"
+      DOCS_MAX_FILE_BYTES: "2000000"
+      DOCS_MAX_RESULTS: "50"
+      DOCS_SEARCH_MAX_FILES: "400"
+  # NOTE (containerized deployment): the opendata connector's repo lives OUTSIDE
+  # this tree (../opendata-mcp) and is not baked into the image — add it at
+  # runtime from the console (Servers → Add) with its path mounted, or bake it in.
+
+  # ---------------------------------------------------------------------------
+  # markitdown — turn PDF/Word/Excel/PowerPoint into Markdown a model can read.
+  # Deliberately shares files-mcp's DOCS_ROOTS: ONE allow-list decides which
+  # documents exist, so a converter can never become a way around it.
+  - name: markitdown
+    command: python
+    args: ["servers/markitdown_server.py"]
+    env:
+      DOCS_ROOTS: "${DOCS_ROOTS}"               # the SAME roots as files-mcp
+      MARKITDOWN_MAX_FILE_BYTES: "20000000"
+      MARKITDOWN_MAX_OUTPUT_BYTES: "1000000"
+      MARKITDOWN_ALLOW_URLS: "0"                # server-side URL fetch = SSRF. Use browser.
+
+  # ---------------------------------------------------------------------------
+  # browser — Chromium via Playwright. The most dangerous tool in this catalogue:
+  # unconstrained, a browser is an SSRF + exfiltration primitive. Every default here
+  # is hostile on purpose.
+  #   * BROWSER_ALLOWED_DOMAINS has NO allow-everything value. Empty ⇒ nothing works.
+  #   * Hosts that RESOLVE to private/link-local addresses are refused even when the
+  #     domain is allow-listed (stops evil.com → 169.254.169.254 metadata theft).
+  #   * JS evaluation and form submission are separate opt-in flags, off by default.
+  - name: browser
+    command: python
+    args: ["servers/browser_server.py"]
+    env:
+      BROWSER_ALLOWED_DOMAINS: "${BROWSER_ALLOWED_DOMAINS}"   # REQUIRED. e.g. ".gov.sa,example.com"
+      BROWSER_ALLOW_PRIVATE_IPS: "0"            # 1 = SSRF against your own network. Review first.
+      BROWSER_ALLOW_EVAL: "0"                   # 1 = arbitrary JS in the page's origin (RCE-ish)
+      BROWSER_ALLOW_INTERACTION: "0"            # 1 = fill+submit forms as the user
+      BROWSER_MAX_TEXT_BYTES: "200000"
+      BROWSER_TIMEOUT_MS: "20000"
+
+  # ---------------------------------------------------------------------------
+  # qdrant — semantic memory. A vector store is where knowledge accumulates OUTSIDE
+  # your document controls, so collections are allow-listed, carry an NDMO
+  # classification (retrieved passages stay governed), and may be marked read-only.
+  # Embeddings are computed locally with fastembed — nothing leaves the host.
+  - name: qdrant
+    command: python
+    args: ["servers/qdrant_server.py"]
+    env:
+      QDRANT_URL: "${QDRANT_URL}"               # e.g. http://qdrant:6333
+      QDRANT_API_KEY_FILE: "${QDRANT_API_KEY_FILE}"
+      QDRANT_COLLECTIONS: "${QDRANT_COLLECTIONS}"   # REQUIRED. "notes:restricted, kb:public:ro"
+      QDRANT_MAX_RESULTS: "50"
+      QDRANT_ALLOW_DELETE_COLLECTION: "0"       # dropping a collection is irreversible
+

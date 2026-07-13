@@ -22,15 +22,22 @@ import anyio
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from . import statestore
 from .config import CONFIG, DATA_DIR, ROOT
 
 # Admin-managed server inventory overlay (survives restarts): servers added or
-# removed from the dashboard without editing config.yaml.
+# removed from the dashboard without editing config.yaml. Phase 3: shared in DB
+# mode, so a server added on one instance exists on all of them — each instance
+# runs its OWN subprocess for the spec (state converges via sync_with_inventory).
 #   {"added": [spec, ...], "removed": ["name", ...]}
 _DYN_FILE = DATA_DIR / "servers_dynamic.json"
 
 
 def _read_dynamic() -> dict:
+    if statestore.enabled():
+        row = statestore.one("SELECT doc FROM kv WHERE name = 'servers_dynamic'")
+        d = row[0] if row else {}
+        return {"added": list(d.get("added", [])), "removed": list(d.get("removed", []))}
     try:
         d = json.loads(_DYN_FILE.read_text(encoding="utf-8"))
         return {"added": list(d.get("added", [])), "removed": list(d.get("removed", []))}
@@ -39,6 +46,12 @@ def _read_dynamic() -> dict:
 
 
 def _write_dynamic(d: dict):
+    if statestore.enabled():
+        statestore.run(
+            "INSERT INTO kv (name, doc, updated) VALUES ('servers_dynamic', %s, %s) "
+            "ON CONFLICT (name) DO UPDATE SET doc = EXCLUDED.doc, updated = EXCLUDED.updated",
+            (json.dumps(d, ensure_ascii=False), time.time()))
+        return
     _DYN_FILE.write_text(json.dumps(d, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
@@ -143,7 +156,8 @@ class ManagedServer:
         self.resources: list[dict] = []
         self.prompts: list[dict] = []
         self._stack: AsyncExitStack | None = None
-        self._lock = asyncio.Lock()
+        self._lock = asyncio.Lock()       # guards RESTART only — calls run concurrently
+        self._generation = 0              # bumped on every reconnect (see _op)
         self.state = "stopped"            # running | stopped (admin lifecycle)
         self.started_at: float | None = None
         self.server_version: str | None = None      # from the MCP initialize handshake
@@ -244,29 +258,57 @@ class ManagedServer:
         self.started_at = time.time()
 
     async def restart(self):
-        """Admin restart: reconnect + rediscover under the per-server lock."""
+        """Admin restart: reconnect + rediscover, exclusive against other restarts."""
         async with self._lock:
             await self._restart()
+            self._generation += 1
 
     async def _op(self, factory):
-        """Run one operation under the per-server lock; on failure, restart the
-        server once (reconnect + rediscover) and retry. Persistent failure raises.
-        An admin-stopped server fails immediately and is NOT auto-restarted."""
-        async with self._lock:
+        """Run one operation; on failure, restart the server once and retry.
+
+        Calls to a server run CONCURRENTLY. They used to be serialized by a per-server
+        lock held for the whole call — which meant one backend served exactly one user at
+        a time, fleet-wide: at 40 concurrent sessions on one connector the last caller
+        waited ~1.6 s behind the other 39, and total throughput pinned at ~24 calls/s no
+        matter how many gateway instances were running. Adding capacity did nothing,
+        because the queue was here.
+
+        The lock was never needed for the calls themselves: MCP is JSON-RPC over one
+        stream and the SDK's ClientSession matches responses to requests by id, so
+        concurrent in-flight calls are exactly what the protocol is for. It was only
+        needed to make RESTART safe. So restart stays exclusive, and a generation counter
+        collapses the thundering herd: when a connection dies, the many in-flight calls
+        that fail together restart it ONCE, and everyone else simply retries on the new
+        session instead of each tearing down the connection the others just rebuilt.
+
+        `factory` takes the session to use, so a call can never land on a session that a
+        concurrent restart has already replaced.
+        """
+        if self.state != "running":
+            raise RuntimeError(f"server {self.name!r} is stopped by an administrator")
+        gen, session = self._generation, self.session
+        try:
+            return await factory(session)
+        except Exception:
+            await self._restart_if_stale(gen)
             if self.state != "running":
                 raise RuntimeError(f"server {self.name!r} is stopped by an administrator")
-            try:
-                return await factory()
-            except Exception:
-                await self._restart()
-                return await factory()
+            return await factory(self.session)
+
+    async def _restart_if_stale(self, gen: int):
+        """Reconnect — unless another failing call already did it for this generation."""
+        async with self._lock:
+            if self._generation != gen:
+                return                      # someone else already rebuilt the connection
+            await self._restart()
+            self._generation += 1
 
     async def call(self, tool: str, arguments: dict) -> tuple[str, list[dict]]:
-        result = await self._op(lambda: self.session.call_tool(tool, arguments))
+        result = await self._op(lambda s: s.call_tool(tool, arguments))
         return _split_content(result.content)
 
     async def read_resource(self, uri: str) -> tuple[str, list[dict]]:
-        result = await self._op(lambda: self.session.read_resource(uri))
+        result = await self._op(lambda s: s.read_resource(uri))
         text_parts, blobs = [], []
         for c in result.contents or []:
             if getattr(c, "text", None) is not None:
@@ -279,7 +321,7 @@ class ManagedServer:
         return "".join(text_parts), blobs
 
     async def get_prompt(self, name: str, arguments: dict) -> dict:
-        result = await self._op(lambda: self.session.get_prompt(name, arguments or {}))
+        result = await self._op(lambda s: s.get_prompt(name, arguments or {}))
         return {"description": result.description or "",
                 "messages": [m.model_dump(mode="json", exclude_none=True) for m in result.messages]}
 
@@ -382,6 +424,35 @@ class MCPManager:
         for srv in self.servers.values():
             await srv.stop()
 
+    async def sync_with_inventory(self) -> dict:
+        """Converge THIS instance's running servers with the shared inventory (DB
+        mode): start specs another instance added, drop servers another instance
+        removed. Admin-stopped servers stay present-and-stopped — a stop is a local
+        lifecycle choice, not an inventory change. Called by the background sweeper;
+        a no-op in file mode (one instance = nothing to converge with)."""
+        if not statestore.enabled():
+            return {"started": [], "removed": []}
+        specs = {s["name"]: s for s in effective_server_specs()}
+        started, removed = [], []
+        for name in [n for n in self.servers if n not in specs]:
+            try:
+                await self.servers[name].stop()
+            except Exception:
+                pass
+            self.servers.pop(name, None)
+            removed.append(name)
+        for name, spec in specs.items():
+            if name in self.servers:
+                continue
+            srv = _make_server(spec)
+            try:
+                await srv.start()
+            except Exception:
+                continue                # unreachable spec: retry on the next sweep
+            self.servers[name] = srv
+            started.append(name)
+        return {"started": started, "removed": removed}
+
     async def health_all(self, timeout: float = 6.0) -> list[dict]:
         """Probe every server's backend concurrently. One slow/dead backend cannot hold up
         the others or the health page — each probe is independently bounded."""
@@ -414,10 +485,11 @@ class MCPManager:
 
     async def start_server(self, name: str):
         srv = self._get(name)
-        async with srv._lock:
+        async with srv._lock:              # exclusive against restarts, like restart()
             if srv.state == "running":
                 return
             await srv._restart()
+            srv._generation += 1
 
     async def add_server(self, spec: dict) -> "ManagedServer":
         """Connect a new server and persist it to the dynamic inventory. Rolls the

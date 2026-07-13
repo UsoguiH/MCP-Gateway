@@ -14,6 +14,7 @@ import shutil
 import time
 from pathlib import Path
 
+from . import statestore
 from .config import CONFIG, DATA_DIR, POLICY, ROOT
 
 VERSION = "1.0.0"                       # gateway control-plane version
@@ -180,12 +181,16 @@ def overview(gw=None) -> dict:
     uptime = now - STARTED_AT
     servers = sorted(gw.mcp.servers) if gw is not None else []
     tools = len(gw.mcp.all_tools()) if gw is not None else 0
+    state_ok, state_msg = statestore.healthy()
     return {
         "version": VERSION,
         "env": os.environ.get("MCP_ENV", "development"),
         "started_at": round(STARTED_AT),
         "uptime_seconds": round(uptime),
         "pid": os.getpid(),
+        "instance_id": statestore.instance_id(),
+        "state_backend": {"backend": "postgres" if statestore.enabled() else "file",
+                          "ok": state_ok, "detail": state_msg},
         "python": f"{os.sys.version_info.major}.{os.sys.version_info.minor}."
                   f"{os.sys.version_info.micro}",
         "servers": servers,
@@ -213,9 +218,16 @@ def overview(gw=None) -> dict:
 # console (which is how you'd fix things) and without the finality of a kill switch.
 
 _MAINT_FILE = DATA_DIR / "maintenance.json"
+_maint_cache = statestore.TTLCache(1.0)
 
 
 def maintenance_status() -> dict:
+    if statestore.enabled():
+        def _load():
+            row = statestore.one("SELECT doc FROM kv WHERE name = 'maintenance'")
+            return row[0] if row else {"enabled": False}
+        m = _maint_cache.get(_load)
+        return m if m.get("enabled") else {"enabled": False}
     try:
         import json
         m = json.loads(_MAINT_FILE.read_text(encoding="utf-8"))
@@ -231,5 +243,12 @@ def set_maintenance(enabled: bool, by: str = "?", message: str = "") -> dict:
     state = {"enabled": bool(enabled), "by": by,
              "message": (message or "Gateway is in maintenance — tool calls are paused.")[:200],
              "since": round(time.time(), 3)}
+    if statestore.enabled():
+        statestore.run(
+            "INSERT INTO kv (name, doc, updated) VALUES ('maintenance', %s, %s) "
+            "ON CONFLICT (name) DO UPDATE SET doc = EXCLUDED.doc, updated = EXCLUDED.updated",
+            (json.dumps(state, ensure_ascii=False), time.time()))
+        _maint_cache.invalidate()
+        return state
     _MAINT_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
     return state

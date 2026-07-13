@@ -19,6 +19,7 @@ import hashlib
 import json
 import threading
 
+from . import statestore
 from .config import CONFIG, DATA_DIR
 
 _REG_FILE = DATA_DIR / "tool_registry.json"
@@ -118,22 +119,119 @@ def _default_tier(name: str, server: str = "") -> int:
 
 
 class Registry:
+    """Phase 3: with the shared backend on, entries live in the gwstate DB so a
+    Risk-Board decision on one instance gates calls on every instance. The local
+    dict becomes a short-TTL read cache; writes go through per-entry upserts, and
+    reconcile() runs under an advisory lock so two instances booting together
+    discover each tool exactly once."""
+
     def __init__(self):
-        self.entries: dict[str, dict] = {}
-        self._load()
+        self._entries: dict[str, dict] = {}
+        self._cache_at = 0.0
+        self._reload_lock = threading.Lock()
+        if not self._db():
+            self._load()
+        else:
+            self._reload()
+
+    def _db(self) -> bool:
+        return statestore.enabled()
+
+    @property
+    def entries(self) -> dict[str, dict]:
+        if self._db():
+            self._maybe_reload()
+        return self._entries
+
+    @entries.setter
+    def entries(self, value: dict[str, dict]):
+        self._entries = value
+
+    def _maybe_reload(self, ttl: float = 2.0):
+        """Refresh the cache at most every `ttl` seconds — and with only ONE thread
+        doing it.
+
+        This is on the hot path twice over: every mediated call reads one entry, and
+        tools/list reads one PER TOOL (243 of them). Without single-flight, the moment the
+        TTL lapsed every in-flight request raced to re-read all ~235 rows at once — and
+        because that made the request slower, the TTL then lapsed again *during* the same
+        tools/list loop, which re-read them again. It fed itself: tools/list measured 17 s
+        at p50 with 40 concurrent clients, at 2 req/s.
+
+        A thread that finds a refresh already in progress just uses the current cache. It
+        is at most `ttl` stale — exactly the guarantee this cache always offered.
+        """
+        import time
+        if time.monotonic() - self._cache_at < ttl:
+            return
+        if not self._reload_lock.acquire(blocking=False):
+            return                              # another thread is already refreshing
+        try:
+            if time.monotonic() - self._cache_at >= ttl:
+                self._reload()
+        finally:
+            self._reload_lock.release()
+
+    def _reload(self):
+        import time
+        self._entries = {k: doc for k, doc in
+                         statestore.all_rows("SELECT key, doc FROM registry_tools")}
+        self._cache_at = time.monotonic()
 
     def _key(self, server: str, tool: str) -> str:
         return f"{server}:{tool}"
 
     def _load(self):
         if _REG_FILE.exists():
-            self.entries = json.loads(_REG_FILE.read_text(encoding="utf-8"))
+            self._entries = json.loads(_REG_FILE.read_text(encoding="utf-8"))
 
     def _save(self):
+        # file mode only: DB mode writes per-entry (a bulk save of a 2 s-stale cache
+        # could overwrite another instance's fresher row).
         with _LOCK:
             _REG_FILE.write_text(
-                json.dumps(self.entries, indent=2, ensure_ascii=False), encoding="utf-8"
+                json.dumps(self._entries, indent=2, ensure_ascii=False), encoding="utf-8"
             )
+
+    def _mutate(self, server: str, tool: str, fn):
+        """Read-modify-write ONE entry safely in either backend.
+
+        `fn(entry) -> False` aborts (no write); any other return commits. DB mode
+        locks the row for the duration, so two admins on two instances cannot
+        interleave a governance decision. Returns the entry after mutation, or
+        None if it does not exist / fn aborted."""
+        key = self._key(server, tool)
+        if self._db():
+            with statestore.tx() as cur:
+                row = cur.execute("SELECT doc FROM registry_tools WHERE key = %s FOR UPDATE",
+                                  (key,)).fetchone()
+                if not row:
+                    return None
+                e = row[0]
+                if fn(e) is False:
+                    return None
+                cur.execute("UPDATE registry_tools SET doc = %s WHERE key = %s",
+                            (json.dumps(e, ensure_ascii=False), key))
+            self._entries[key] = e            # keep the local cache coherent immediately
+            return e
+        e = self._entries.get(key)
+        if e is None or fn(e) is False:
+            return None
+        self._save()
+        return e
+
+    def _save_entry(self, key: str, cur=None):
+        """Write-through one entry (DB mode); file mode rewrites the whole file."""
+        if not self._db():
+            self._save()
+            return
+        doc = json.dumps(self._entries[key], ensure_ascii=False)
+        sql = ("INSERT INTO registry_tools (key, doc) VALUES (%s, %s) "
+               "ON CONFLICT (key) DO UPDATE SET doc = EXCLUDED.doc")
+        if cur is not None:
+            cur.execute(sql, (key, doc))
+        else:
+            statestore.run(sql, (key, doc))
 
     def reconcile(self, tools: list[dict]) -> list[dict]:
         """Compare discovered tools against pinned entries. Returns list of change events.
@@ -143,17 +241,32 @@ class Registry:
         changed when drift quarantines it — approving a hash you can't inspect is not
         governance (A8/A24).
         """
+        if self._db():
+            with statestore.tx() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (statestore.LOCK_REGISTRY,))
+                self._entries = {k: doc for k, doc in
+                                 cur.execute("SELECT key, doc FROM registry_tools").fetchall()}
+                events, dirty = self._reconcile_into_entries(tools)
+                for key in dirty:
+                    self._save_entry(key, cur=cur)
+            import time
+            self._cache_at = time.monotonic()
+            return events
+        events, _dirty = self._reconcile_into_entries(tools)
+        self._save()
+        return events
+
+    def _reconcile_into_entries(self, tools: list[dict]) -> tuple[list[dict], set]:
         events = []
-        seen = set()
+        dirty: set[str] = set()
         for t in tools:
             key = self._key(t["server"], t["name"])
-            seen.add(key)
             fp = tool_fingerprint(t)
             definition = {"description": t.get("description", ""), "schema": t.get("schema", {})}
-            entry = self.entries.get(key)
+            entry = self._entries.get(key)
             if entry is None:
                 status = "pending" if _REQUIRE_APPROVAL else "active"
-                self.entries[key] = {
+                self._entries[key] = {
                     "server": t["server"],
                     "tool": t["name"],
                     "tier": _default_tier(t["name"], t["server"]),
@@ -162,8 +275,9 @@ class Registry:
                     "quarantine_reason": None,
                     "definition": definition,
                 }
+                dirty.add(key)
                 events.append({"type": "new_tool", "key": key,
-                               "tier": self.entries[key]["tier"], "status": status})
+                               "tier": self._entries[key]["tier"], "status": status})
             elif entry["status"] == "rejected":
                 continue                      # banned by an admin: never silently resurrect
             elif entry["fingerprint"] != fp:
@@ -171,11 +285,12 @@ class Registry:
                 entry["quarantine_reason"] = "definition_drift"
                 entry["pending_fingerprint"] = fp
                 entry["pending_definition"] = definition   # the "after" side of the diff
+                dirty.add(key)
                 events.append({"type": "drift_quarantine", "key": key})
             elif not entry.get("definition"):
                 entry["definition"] = definition           # backfill pre-Phase-2 entries
-        self._save()
-        return events
+                dirty.add(key)
+        return events, dirty
 
     def get(self, server: str, tool: str) -> dict | None:
         return self.entries.get(self._key(server, tool))
@@ -189,80 +304,67 @@ class Registry:
         return bool(e and e["status"] == "active")
 
     def set_tier(self, server: str, tool: str, tier: int):
-        e = self.get(server, tool)
-        if e:
-            e["tier"] = tier
-            self._save()
+        self._mutate(server, tool, lambda e: e.__setitem__("tier", tier))
 
     def approve_tool(self, server: str, tool: str) -> bool:
         """Risk-Board activation of a pending (newly-onboarded) tool."""
-        e = self.get(server, tool)
-        if e and e["status"] == "pending":
+        def fn(e):
+            if e["status"] != "pending":
+                return False
             e["status"] = "active"
-            self._save()
-            return True
-        return False
+        return self._mutate(server, tool, fn) is not None
 
     def pending(self) -> list[dict]:
         return [e for e in self.entries.values() if e["status"] == "pending"]
 
     def approve_drift(self, server: str, tool: str):
         """Accept a drifted definition (re-pin) and reactivate."""
-        e = self.get(server, tool)
-        if e and e.get("pending_fingerprint"):
+        def fn(e):
+            if not e.get("pending_fingerprint"):
+                return False
             e["fingerprint"] = e.pop("pending_fingerprint")
             if e.get("pending_definition"):
                 e["definition"] = e.pop("pending_definition")
             e["status"] = "active"
             e["quarantine_reason"] = None
-            self._save()
+        self._mutate(server, tool, fn)
 
     def quarantine(self, server: str, tool: str, reason: str) -> bool:
         """Manual containment of one tool (admin) — narrower than a kill switch and
         it survives a restart because the registry is the gate every call passes."""
-        e = self.get(server, tool)
-        if not e:
-            return False
-        e["status"] = "quarantined"
-        e["quarantine_reason"] = reason or "manual"
-        self._save()
-        return True
+        def fn(e):
+            e["status"] = "quarantined"
+            e["quarantine_reason"] = reason or "manual"
+        return self._mutate(server, tool, fn) is not None
 
     def unquarantine(self, server: str, tool: str) -> bool:
         """Release a manually quarantined tool. A tool quarantined by DRIFT is not
         released here — that path must go through approve_drift (re-pin the hash),
         so a definition change can never be waved through by accident."""
-        e = self.get(server, tool)
-        if not e or e["status"] != "quarantined":
-            return False
-        if e.get("pending_fingerprint"):
-            return False
-        e["status"] = "active"
-        e["quarantine_reason"] = None
-        self._save()
-        return True
+        def fn(e):
+            if e["status"] != "quarantined" or e.get("pending_fingerprint"):
+                return False
+            e["status"] = "active"
+            e["quarantine_reason"] = None
+        return self._mutate(server, tool, fn) is not None
 
     def reject(self, server: str, tool: str, reason: str = "") -> bool:
         """Risk-Board REJECTION of a tool: it stays known and permanently inactive, and
         reconcile() will not resurrect it on the next discovery. The counterpart to
         approve_tool — until now an admin could only ever say yes."""
-        e = self.get(server, tool)
-        if not e:
-            return False
-        e["status"] = "rejected"
-        e["quarantine_reason"] = (reason or "rejected by Risk Board")[:200]
-        self._save()
-        return True
+        def fn(e):
+            e["status"] = "rejected"
+            e["quarantine_reason"] = (reason or "rejected by Risk Board")[:200]
+        return self._mutate(server, tool, fn) is not None
 
     def reinstate(self, server: str, tool: str) -> bool:
         """Undo a rejection — the tool returns to `pending` for a fresh decision."""
-        e = self.get(server, tool)
-        if not e or e["status"] != "rejected":
-            return False
-        e["status"] = "pending"
-        e["quarantine_reason"] = None
-        self._save()
-        return True
+        def fn(e):
+            if e["status"] != "rejected":
+                return False
+            e["status"] = "pending"
+            e["quarantine_reason"] = None
+        return self._mutate(server, tool, fn) is not None
 
     def drift_diff(self, server: str, tool: str) -> dict | None:
         """What actually changed in a quarantined tool: pinned vs pending definition."""

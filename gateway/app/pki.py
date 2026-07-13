@@ -28,6 +28,7 @@ import base64
 import datetime as _dt
 import hashlib
 import os
+import threading
 from pathlib import Path
 
 from cryptography import x509
@@ -35,7 +36,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from .config import CONFIG, ROOT, secret
+from .config import CONFIG, ROOT, secret, secret_cached
 
 
 def _kek() -> bytes:
@@ -43,7 +44,7 @@ def _kek() -> bytes:
     PRODUCTION: set MCP_GATEWAY_KEK from a secret store, or hold the keys in an HSM
     so they never touch disk. Dev fallback keeps the demo runnable. Supports
     MCP_GATEWAY_KEK_FILE (Docker/K8s secret mount)."""
-    return secret("MCP_GATEWAY_KEK", "dev-kek-change-me").encode("utf-8")
+    return secret_cached("MCP_GATEWAY_KEK", "dev-kek-change-me").encode("utf-8")
 
 _PKI_DIR = ROOT / CONFIG["auth"].get("pki_dir", "pki")
 _CA_CERT = _PKI_DIR / "ca.cert.pem"
@@ -140,14 +141,46 @@ def load_ca() -> tuple[x509.Certificate, ec.EllipticCurvePrivateKey]:
     return cert, key
 
 
+# The token-signing key is loaded ONCE.
+#
+# signing_key() runs on every JWT sign AND every JWT verify — i.e. on every
+# authenticated request. It used to, each time: read the KEK from the secrets mount
+# (~2.7 ms there), read the PEM off disk, and then DECRYPT that PEM — which runs the
+# passphrase KDF the key is sealed with, and that KDF is expensive on purpose. The
+# gateway was paying a deliberately-slow key-derivation per request, forever.
+#
+# The key material is immutable for the life of the process (rotating it is a restart —
+# OPERATIONS §5b), so it is decrypted once and kept. It stays in memory either way: it
+# has to be, to sign anything.
+_signing_key = None
+_signing_pub_pem: bytes | None = None
+_sign_lock = threading.Lock()
+
+
 def signing_key() -> ec.EllipticCurvePrivateKey:
-    _ensure_signing_key()
-    return serialization.load_pem_private_key(_SIGN_KEY.read_bytes(), password=_kek())
+    global _signing_key
+    if _signing_key is None:
+        with _sign_lock:
+            if _signing_key is None:
+                _ensure_signing_key()
+                _signing_key = serialization.load_pem_private_key(
+                    _SIGN_KEY.read_bytes(), password=_kek())
+    return _signing_key
 
 
 def signing_public_pem() -> bytes:
-    return signing_key().public_key().public_bytes(
-        serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+    global _signing_pub_pem
+    if _signing_pub_pem is None:
+        _signing_pub_pem = signing_key().public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
+    return _signing_pub_pem
+
+
+def reload_signing_key():
+    """Drop the cached key (tests; and an in-process re-read after a rotation)."""
+    global _signing_key, _signing_pub_pem
+    with _sign_lock:
+        _signing_key, _signing_pub_pem = None, None
 
 
 def ensure_user_cert(username: str) -> x509.Certificate:

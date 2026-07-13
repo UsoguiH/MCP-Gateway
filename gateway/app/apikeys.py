@@ -23,6 +23,7 @@ import secrets
 import threading
 import time
 
+from . import statestore
 from .config import DATA_DIR
 
 _FILE = DATA_DIR / "api_keys.json"
@@ -32,10 +33,20 @@ SCOPES: dict[str, int | None] = {"read": 0, "standard": 1, "full": None}
 
 
 def _load() -> dict:
+    if statestore.enabled():
+        return {kid: doc for kid, doc in
+                statestore.all_rows("SELECT kid, doc FROM api_keys")}
     try:
         return json.loads(_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def _save_one(rec: dict):
+    statestore.run(
+        "INSERT INTO api_keys (kid, doc) VALUES (%s, %s) "
+        "ON CONFLICT (kid) DO UPDATE SET doc = EXCLUDED.doc",
+        (rec["kid"], json.dumps(rec, ensure_ascii=False)))
 
 
 def _save(d: dict):
@@ -63,6 +74,9 @@ def issue(name: str, sub: str, scope: str, ttl_days: int | None,
         "expires": now + int(ttl_days) * 86400 if ttl_days else None,
         "last_used": None, "revoked": False,
     }
+    if statestore.enabled():
+        _save_one(rec)
+        return rec, token
     with _LOCK:
         d = _load()
         d[kid] = rec
@@ -77,13 +91,14 @@ def verify(token: str) -> dict | None:
     from . import auth                              # late import: no cycle at module load
     if not token or not token.startswith("mcpk_"):
         return None
+    auth.refresh_directory()     # cross-instance operator changes gate key use too
     parts = token.split("_", 2)
     if len(parts) != 3:
         return None
     kid = parts[1]
-    with _LOCK:
-        d = _load()
-        rec = d.get(kid)
+    if statestore.enabled():
+        row = statestore.one("SELECT doc FROM api_keys WHERE kid = %s", (kid,))
+        rec = row[0] if row else None
         if not rec or rec.get("revoked"):
             return None
         if not secrets.compare_digest(rec["hash"], _hash(token)):
@@ -91,10 +106,24 @@ def verify(token: str) -> dict | None:
         now = int(time.time())
         if rec.get("expires") and now > rec["expires"]:
             return None
-        # throttled last-used stamp (avoid a disk write per call)
         if not rec.get("last_used") or now - rec["last_used"] > 60:
             rec["last_used"] = now
-            _save(d)
+            _save_one(rec)                       # throttled last-used stamp
+    else:
+        with _LOCK:
+            d = _load()
+            rec = d.get(kid)
+            if not rec or rec.get("revoked"):
+                return None
+            if not secrets.compare_digest(rec["hash"], _hash(token)):
+                return None
+            now = int(time.time())
+            if rec.get("expires") and now > rec["expires"]:
+                return None
+            # throttled last-used stamp (avoid a disk write per call)
+            if not rec.get("last_used") or now - rec["last_used"] > 60:
+                rec["last_used"] = now
+                _save(d)
     sub = rec["sub"]
     u = auth.USERS.get(sub)
     if not u or sub in auth.revoked():
@@ -111,6 +140,14 @@ def verify(token: str) -> dict | None:
 
 
 def revoke(kid: str) -> dict | None:
+    if statestore.enabled():
+        row = statestore.one("SELECT doc FROM api_keys WHERE kid = %s", (kid,))
+        if not row:
+            return None
+        rec = row[0]
+        rec["revoked"] = True
+        _save_one(rec)
+        return rec
     with _LOCK:
         d = _load()
         rec = d.get(kid)

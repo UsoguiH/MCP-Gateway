@@ -54,9 +54,47 @@ async def _approval_sweeper(interval_s: int = 300):
             pass                                # a sweep must never crash the gateway
 
 
+async def _state_sweeper(interval_s: int = 30):
+    """Phase-3 housekeeping (DB mode only): converge this instance's MCP servers
+    with the shared inventory (a server added on another instance starts here
+    within one sweep) and reap idle shared sessions."""
+    import asyncio
+    from . import statestore
+    tick = 0
+    while True:
+        try:
+            await asyncio.sleep(interval_s)
+            if not statestore.enabled():
+                continue
+            changed = await gw.mcp.sync_with_inventory()
+            if changed["started"] or changed["removed"]:
+                gw.registry.reconcile(gw.mcp.all_tools())
+                audit.record("server_inventory_synced",
+                             instance=statestore.instance_id(), **changed)
+            tick += 1
+            if tick % 10 == 0:                  # every ~5 min
+                reaped = mcp_server.reap_idle_sessions()
+                if reaped:
+                    audit.record("mcp_sessions_reaped", count=reaped,
+                                 instance=statestore.instance_id())
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            pass                                # a sweep must never crash the gateway
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
+
+    import anyio.to_thread
+    # The control pipeline is synchronous and DB-bound, so it runs in worker threads
+    # (Gateway._execute_call) to keep the event loop free. AnyIO's default limiter is 40
+    # threads for the WHOLE process — with the pipeline threaded, that ceiling becomes the
+    # next queue behind the connection pool. Size it with the pool, not against it.
+    limiter = anyio.to_thread.current_default_thread_limiter()
+    limiter.total_tokens = int(os.environ.get("MCP_WORKER_THREADS", "64"))
+
     await gw.startup()
     # Verify the ENTIRE audit chain once, at boot: it seeds the incremental verifier's
     # state and is the pass that would catch an edit to a historical record (something an
@@ -68,8 +106,10 @@ async def lifespan(app: FastAPI):
     audit.record("gateway_startup", servers=list(gw.mcp.servers.keys()),
                  chain_ok=chain_ok, chain_status=chain_msg)
     sweeper = asyncio.create_task(_approval_sweeper())
+    state_sweeper = asyncio.create_task(_state_sweeper())
     yield
     sweeper.cancel()
+    state_sweeper.cancel()
     await gw.shutdown()
 
 
@@ -112,6 +152,11 @@ async def edge_guard(request: Request, call_next):
     # feature access, cross-origin isolation, transport security, and a strict CSP
     # that blocks any external script/style/connect/frame.
     response.headers["MCP-Protocol-Version"] = "2025-11-25"   # A10: advertise spec revision
+    # Which instance served this request (Phase 3). Behind a load balancer, "the
+    # gateway was slow / returned that" is unanswerable without it — an operator
+    # correlating an audit record with a node's logs needs the node's name.
+    from . import statestore as _ss
+    response.headers["X-Gateway-Instance"] = _ss.instance_id()
     response.headers["Content-Security-Policy"] = (
         "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
         "script-src 'self' 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; "
@@ -1622,11 +1667,12 @@ def servers_view(claims: dict = Depends(require_admin)):
     (from audit durations). All three were em-dashes in the console (A16)."""
     from .vault import vault
     stats = insights.server_stats()
+    breaker = gw.breaker_snapshot()
     now = time.time()
     out = []
     for name, srv in gw.mcp.servers.items():
         entries = [e for e in (gw.registry.get(name, t["name"]) for t in srv.tools) if e]
-        b = gw._breaker.get(name, {})
+        b = breaker.get(name, {})
         st = stats.get(name, {})
         out.append({
             "name": name, "tools": len(srv.tools),
@@ -1893,7 +1939,7 @@ def metrics(claims: dict = Depends(require_admin)):
     from .vault import vault
     return {"event_counts": audit.counts(),
             "circuit_breaker": {s: {"fails": b["fails"], "open": gw._breaker_open(s)}
-                                for s, b in gw._breaker.items()},
+                                for s, b in gw.breaker_snapshot().items()},
             "active_credential_leases": len(vault.active_leases()),
             "pending_tool_onboarding": len(gw.registry.pending())}
 
@@ -1903,9 +1949,14 @@ def health():
     # Cached full verification (see audit.chain_status): the health endpoint is polled by
     # the container healthcheck and every dashboard refresh, and an O(n) HMAC re-pass over
     # the whole log on each call made the gateway spend its CPU re-proving the same thing.
+    from . import statestore
     ok, msg = audit.chain_status()
-    return {"status": "ok" if gw.started else "starting",
+    state_ok, state_msg = statestore.healthy()
+    return {"status": ("ok" if gw.started else "starting") if state_ok else "degraded",
             "auth_mode": auth._MODE,
+            "instance": statestore.instance_id(),
+            "state_backend": "postgres" if statestore.enabled() else "file",
+            "state_ok": state_ok, "state_detail": state_msg,
             "servers": list(gw.mcp.servers.keys()),
             "tools": len(gw.mcp.all_tools()),
             "pending_tools": len(gw.registry.pending()),

@@ -38,7 +38,7 @@ import jwt
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from . import pki
+from . import pki, statestore
 from .config import CONFIG, DATA_DIR, secret
 
 _A = CONFIG["auth"]
@@ -90,12 +90,56 @@ _fails: dict[str, tuple[int, float]] = {}        # subject -> (count, locked_unt
 # Applied at import time, so USERS everywhere reflects the managed directory.
 _OPS_FILE = DATA_DIR / "operators.json"
 
+# Phase 3: in DB mode the directory overlay, credentials, MFA secrets, revocations,
+# session stamps and lockouts live in the shared gwstate database, so an operator
+# created / offboarded / revoked on one gateway instance exists / dies on every
+# instance. The in-process USERS dict stays (every consumer reads it) and is
+# re-folded from the DB on a short TTL by _refresh_directory().
+_dir_refreshed_at = 0.0
+_revoked_cache = statestore.TTLCache(2.0)
+_nb_cache = statestore.TTLCache(2.0)
+
+
+def refresh_directory(max_age: float = 2.0):
+    """DB mode: fold operator/credential changes made on OTHER instances into this
+    process's USERS (TTL-bounded — every authenticated request passes through here,
+    so a change propagates in ≤ max_age + token cache time). File mode: no-op.
+
+    `max_age=0` forces a read. Every ADMIN MUTATOR below does that before it decides,
+    because those decisions are made against USERS: without it, an operator offboarded
+    on instance A still "exists" on instance B for up to max_age seconds, and recreating
+    them there fails with a spurious 'already exists'."""
+    global _dir_refreshed_at
+    if not statestore.enabled():
+        return
+    now = time.monotonic()
+    if max_age and now - _dir_refreshed_at < max_age:
+        return
+    _dir_refreshed_at = now
+    _apply_ops_overlay()
+    _load_credentials()
+
 
 def _read_ops_overlay() -> dict:
+    if statestore.enabled():
+        return {sub: doc for sub, doc in
+                statestore.all_rows("SELECT sub, doc FROM operators")}
     try:
         return json.loads(_OPS_FILE.read_text(encoding="utf-8"))
     except Exception:
         return {}
+
+
+def _write_ops_overlay_entry(sub: str, rec: dict):
+    if statestore.enabled():
+        statestore.run(
+            "INSERT INTO operators (sub, doc) VALUES (%s, %s) "
+            "ON CONFLICT (sub) DO UPDATE SET doc = EXCLUDED.doc",
+            (sub, json.dumps(rec, ensure_ascii=False)))
+        return
+    d = _read_ops_overlay()
+    d[sub] = rec
+    _write_ops_overlay(d)
 
 
 def _write_ops_overlay(d: dict):
@@ -117,6 +161,7 @@ def _apply_ops_overlay():
 
 def create_operator(sub: str, name: str, role: str, clearance: str) -> tuple[bool, str]:
     from .config import POLICY, CLEARANCE_ORDER
+    refresh_directory(0)                     # decide against fleet-fresh state, not a cache
     sub = (sub or "").strip().lower()
     if not sub or not sub.replace("-", "").replace("_", "").isalnum() or len(sub) > 32:
         return False, "username must be 1-32 alphanumeric/-/_ characters"
@@ -127,9 +172,8 @@ def create_operator(sub: str, name: str, role: str, clearance: str) -> tuple[boo
     if clearance not in CLEARANCE_ORDER:
         return False, f"unknown clearance {clearance!r}"
     with _lock:
-        d = _read_ops_overlay()
-        d[sub] = {"name": (name or sub)[:80], "role": role, "clearance": clearance}
-        _write_ops_overlay(d)
+        _write_ops_overlay_entry(sub, {"name": (name or sub)[:80], "role": role,
+                                       "clearance": clearance})
     _apply_ops_overlay()
     return True, ""
 
@@ -137,6 +181,7 @@ def create_operator(sub: str, name: str, role: str, clearance: str) -> tuple[boo
 def update_operator(sub: str, role: str | None = None, clearance: str | None = None,
                     name: str | None = None) -> tuple[bool, str]:
     from .config import POLICY, CLEARANCE_ORDER
+    refresh_directory(0)
     u = USERS.get(sub)
     if not u:
         return False, f"unknown operator {sub!r}"
@@ -151,8 +196,7 @@ def update_operator(sub: str, role: str | None = None, clearance: str | None = N
         rec["name"] = name if name is not None else u["name"]
         rec["role"] = role if role is not None else u["role"]
         rec["clearance"] = clearance if clearance is not None else u["clearance"]
-        d[sub] = rec
-        _write_ops_overlay(d)
+        _write_ops_overlay_entry(sub, rec)
     _apply_ops_overlay()
     return True, ""
 
@@ -161,17 +205,19 @@ def remove_operator(sub: str) -> tuple[bool, str]:
     """Offboard: drop from the directory, purge credential + authenticator, and
     kill every live session/token. Existing tokens die because verify() no longer
     finds the subject; belt-and-braces we also stamp a session not-before."""
+    refresh_directory(0)
     if sub not in USERS:
         return False, f"unknown operator {sub!r}"
     with _lock:
-        d = _read_ops_overlay()
-        d[sub] = {"removed": True}
-        _write_ops_overlay(d)
+        _write_ops_overlay_entry(sub, {"removed": True})
         USERS.pop(sub, None)
-        creds = _read_creds()
-        if sub in creds:
-            creds.pop(sub)
-            _CREDS_FILE.write_text(json.dumps(creds, indent=2), encoding="utf-8")
+        if statestore.enabled():
+            statestore.run("DELETE FROM credentials WHERE sub = %s", (sub,))
+        else:
+            creds = _read_creds()
+            if sub in creds:
+                creds.pop(sub)
+                _CREDS_FILE.write_text(json.dumps(creds, indent=2), encoding="utf-8")
     unenroll_totp(sub)
     terminate_sessions(sub)
     return True, ""
@@ -180,6 +226,7 @@ def remove_operator(sub: str) -> tuple[bool, str]:
 def reset_password(sub: str) -> tuple[str | None, str]:
     """Admin reset: generate a strong temporary password (returned ONCE), force
     rotation at next login. Returns (temp_password, error)."""
+    refresh_directory(0)
     if sub not in USERS:
         return None, f"unknown operator {sub!r}"
     import string
@@ -211,14 +258,23 @@ _session_nb: dict[str, float] = _load_session_nb()
 
 
 def session_not_before(sub: str) -> float:
+    if statestore.enabled():
+        m = _nb_cache.get(lambda: dict(statestore.all_rows("SELECT sub, nb FROM session_nb")))
+        return float(m.get(sub, 0.0))
     return _session_nb.get(sub, 0.0)
 
 
 def terminate_sessions(sub: str):
     """Invalidate every outstanding token for `sub` (issued before now)."""
-    with _lock:
-        _session_nb[sub] = time.time()
-        _SESSION_NB_FILE.write_text(json.dumps(_session_nb), encoding="utf-8")
+    if statestore.enabled():
+        statestore.run(
+            "INSERT INTO session_nb (sub, nb) VALUES (%s, %s) "
+            "ON CONFLICT (sub) DO UPDATE SET nb = EXCLUDED.nb", (sub, time.time()))
+        _nb_cache.invalidate()
+    else:
+        with _lock:
+            _session_nb[sub] = time.time()
+            _SESSION_NB_FILE.write_text(json.dumps(_session_nb), encoding="utf-8")
     try:                                     # refresh tokens die too (late import: no cycle)
         from . import oauth
         oauth.revoke_refresh_for_sub(sub)
@@ -248,14 +304,37 @@ def _save_revoked():
 _revoked_subjects: set[str] = _load_revoked()    # identity kill-switch (durable)
 
 
+def _is_revoked(sub: str) -> bool:
+    """Membership check used on every verify path. DB mode reads the shared table
+    (2 s TTL cache), so a revocation on one instance blocks on all of them."""
+    if statestore.enabled():
+        return sub in _revoked_cache.get(
+            lambda: {r[0] for r in statestore.all_rows("SELECT sub FROM revoked_subjects")})
+    return sub in _revoked_subjects
+
+
 # ---------- anti-hammering (models TPM lockout) ----------
 def locked(sub: str) -> bool:
+    if statestore.enabled():
+        row = statestore.one("SELECT locked_until FROM lockouts WHERE sub = %s", (sub,))
+        return bool(row and row[0] > time.time())
     with _lock:
         cnt, until = _fails.get(sub, (0, 0.0))
         return until > time.time()
 
 
 def _record_fail(sub: str):
+    if statestore.enabled():
+        # One atomic upsert: concurrent failures across instances still hit the
+        # threshold exactly (a distributed brute force cannot stay under it by
+        # spreading attempts over nodes).
+        statestore.run(
+            "INSERT INTO lockouts (sub, fails, locked_until) VALUES (%s, 1, 0) "
+            "ON CONFLICT (sub) DO UPDATE SET fails = lockouts.fails + 1, "
+            "locked_until = CASE WHEN lockouts.fails + 1 >= %s THEN %s "
+            "ELSE lockouts.locked_until END",
+            (sub, _LOCK_THRESHOLD, time.time() + _LOCK_SECONDS))
+        return
     with _lock:
         cnt, until = _fails.get(sub, (0, 0.0))
         cnt += 1
@@ -273,6 +352,9 @@ def note_failure(sub: str):
 
 
 def _clear_fails(sub: str):
+    if statestore.enabled():
+        statestore.run("DELETE FROM lockouts WHERE sub = %s", (sub,))
+        return
     with _lock:
         _fails.pop(sub, None)
 
@@ -284,6 +366,10 @@ def clear_failures(sub: str):
 
 def lockout_status() -> dict:
     now = time.time()
+    if statestore.enabled():
+        return {s: {"fails": int(c), "locked_for": max(0, round(u - now))}
+                for s, c, u in statestore.all_rows(
+                    "SELECT sub, fails, locked_until FROM lockouts WHERE fails > 0")}
     with _lock:
         return {s: {"fails": c, "locked_for": max(0, round(u - now))}
                 for s, (c, u) in _fails.items() if c}
@@ -299,11 +385,15 @@ _MFA_FILE = DATA_DIR / "mfa_secrets.json"
 
 
 def _mfa_aes_key() -> bytes:
-    kek = secret("MCP_GATEWAY_KEK", "dev-kek-change-me").encode("utf-8")
+    from .config import secret_cached
+    kek = secret_cached("MCP_GATEWAY_KEK", "dev-kek-change-me").encode("utf-8")
     return hashlib.sha256(b"mfa-secrets:" + kek).digest()
 
 
 def _load_mfa() -> dict:
+    if statestore.enabled():
+        return {sub: blob for sub, blob in
+                statestore.all_rows("SELECT sub, blob FROM mfa_secrets")}
     try:
         return json.loads(_MFA_FILE.read_text(encoding="utf-8"))
     except Exception:
@@ -318,10 +408,16 @@ def enroll_totp(sub: str) -> tuple[str, str]:
     raw = secrets.token_bytes(20)
     nonce = secrets.token_bytes(12)
     blob = nonce + AESGCM(_mfa_aes_key()).encrypt(nonce, raw, sub.encode("utf-8"))
+    encoded = base64.b64encode(blob).decode()
     with _lock:
-        d = _load_mfa()
-        d[sub] = base64.b64encode(blob).decode()
-        _MFA_FILE.write_text(json.dumps(d, indent=2), encoding="utf-8")
+        if statestore.enabled():
+            statestore.run(
+                "INSERT INTO mfa_secrets (sub, blob) VALUES (%s, %s) "
+                "ON CONFLICT (sub) DO UPDATE SET blob = EXCLUDED.blob", (sub, encoded))
+        else:
+            d = _load_mfa()
+            d[sub] = encoded
+            _MFA_FILE.write_text(json.dumps(d, indent=2), encoding="utf-8")
     b32 = base64.b32encode(raw).decode().rstrip("=")
     uri = (f"otpauth://totp/MCP-Gateway:{sub}?secret={b32}&issuer=MCP-Gateway"
            f"&algorithm=SHA1&digits={_MFA_DIGITS}&period={_MFA_STEP}")
@@ -330,6 +426,10 @@ def enroll_totp(sub: str) -> tuple[str, str]:
 
 def unenroll_totp(sub: str) -> bool:
     with _lock:
+        if statestore.enabled():
+            row = statestore.one("DELETE FROM mfa_secrets WHERE sub = %s RETURNING sub",
+                                 (sub,))
+            return row is not None
         d = _load_mfa()
         existed = d.pop(sub, None) is not None
         _MFA_FILE.write_text(json.dumps(d, indent=2), encoding="utf-8")
@@ -337,14 +437,23 @@ def unenroll_totp(sub: str) -> bool:
 
 
 def mfa_enrolled(sub: str) -> bool:
+    if statestore.enabled():
+        return statestore.one("SELECT 1 FROM mfa_secrets WHERE sub = %s", (sub,)) is not None
     return sub in _load_mfa()
+
+
+def _mfa_blob(sub: str) -> str | None:
+    if statestore.enabled():
+        row = statestore.one("SELECT blob FROM mfa_secrets WHERE sub = %s", (sub,))
+        return row[0] if row else None
+    return _load_mfa().get(sub)
 
 
 def _totp_secret(sub: str) -> bytes | None:
     """Enrolled secret (decrypted per call so enrollment is visible across
     processes/restarts). Falls back to the deterministic dev secret only in dev
     mode; otherwise un-enrolled == no secret == MFA fails closed."""
-    blob = _load_mfa().get(sub)
+    blob = _mfa_blob(sub)
     if blob:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
         try:
@@ -436,6 +545,9 @@ _PW_MAX_AGE_DAYS = int(_A.get("password_max_age_days", 0))   # 0 = no expiry
 
 
 def _read_creds() -> dict:
+    if statestore.enabled():
+        return {sub: doc for sub, doc in
+                statestore.all_rows("SELECT sub, doc FROM credentials")}
     try:
         return json.loads(_CREDS_FILE.read_text(encoding="utf-8"))
     except Exception:
@@ -468,11 +580,18 @@ def set_password(username: str, new_password: str, must_change: bool = True) -> 
     ok, msg = password_strength(new_password)
     if not ok:
         return False, msg
-    creds = _read_creds()
+    rec = {"hash": hash_password(new_password),
+           "set_at": _now_epoch(), "must_change": must_change}
     with _lock:
-        creds[username] = {"hash": hash_password(new_password),
-                           "set_at": _now_epoch(), "must_change": must_change}
-        _CREDS_FILE.write_text(json.dumps(creds, indent=2), encoding="utf-8")
+        if statestore.enabled():
+            statestore.run(
+                "INSERT INTO credentials (sub, doc) VALUES (%s, %s) "
+                "ON CONFLICT (sub) DO UPDATE SET doc = EXCLUDED.doc",
+                (username, json.dumps(rec)))
+        else:
+            creds = _read_creds()
+            creds[username] = rec
+            _CREDS_FILE.write_text(json.dumps(creds, indent=2), encoding="utf-8")
     _load_credentials()
     return True, ""
 
@@ -526,8 +645,9 @@ def authenticate_password(username: str, password: str, otp: str = "",
     (bearer-binding). Returns (token, binding) or None. Constant-time on the
     password; every failure feeds the anti-hammering lockout."""
     require_mfa = _REQUIRE_MFA if require_mfa is None else require_mfa
+    refresh_directory()
     u = USERS.get(username)
-    if not u or username in _revoked_subjects or locked(username):
+    if not u or _is_revoked(username) or locked(username):
         verify_password(password or "", _DUMMY_HASH)     # flatten user-enumeration timing
         return None
     stored = u.get("pwd_hash")
@@ -554,8 +674,9 @@ def verify_password_layer(username: str, password: str) -> bool:
     """Layer 1: verify username + password only (no token, no MFA). Constant-time;
     a wrong password feeds the anti-hammering lockout. Fails-closed for unknown,
     revoked, or locked identities."""
+    refresh_directory()
     u = USERS.get(username)
-    if not u or username in _revoked_subjects or locked(username):
+    if not u or _is_revoked(username) or locked(username):
         verify_password(password or "", _DUMMY_HASH)     # flatten user-enumeration timing
         return False
     stored = u.get("pwd_hash")
@@ -589,7 +710,8 @@ def verify_mfa_ticket(ticket: str) -> str | None:
 def complete_mfa(username: str, otp: str) -> tuple[str, str] | None:
     """Layer 2: for a password-verified user, verify the TOTP code and mint the
     session. A wrong code feeds the lockout."""
-    if username not in USERS or username in _revoked_subjects or locked(username):
+    refresh_directory()
+    if username not in USERS or _is_revoked(username) or locked(username):
         return None
     if not verify_totp(username, otp):
         _record_fail(username)
@@ -707,7 +829,8 @@ def make_challenge(cert_pem: str | bytes) -> dict | None:
     if not pki.verify_cert_chain(cert):
         return None
     cn = pki.cert_common_name(cert)
-    if cn not in USERS or cn in _revoked_subjects or locked(cn):
+    refresh_directory()
+    if cn not in USERS or _is_revoked(cn) or locked(cn):
         return None
     thumb = pki.cert_thumbprint(cert)
     nonce = secrets.token_hex(32)
@@ -726,7 +849,7 @@ def authenticate(cert_pem: str | bytes, nonce: str, signature: bytes,
     except Exception:
         return None
     cn = pki.cert_common_name(cert)
-    if cn in _revoked_subjects or (cn and locked(cn)):
+    if _is_revoked(cn) or (cn and locked(cn)):
         return None
     thumb = pki.cert_thumbprint(cert)
 
@@ -798,7 +921,7 @@ def verify_oidc(token: str) -> dict | None:
     except Exception:
         return None
     sub = claims.get("sub")
-    if not sub or sub in _revoked_subjects:
+    if not sub or _is_revoked(sub):
         return None
     return {
         "sub": sub,
@@ -812,6 +935,7 @@ def verify_oidc(token: str) -> dict | None:
 
 
 def _verify_builtin(token: str, cert_thumbprint: str | None) -> dict | None:
+    refresh_directory()          # every authed request folds in cross-instance changes
     try:
         claims = jwt.decode(
             token, pki.signing_public_pem(), algorithms=[_ALG],
@@ -828,7 +952,7 @@ def _verify_builtin(token: str, cert_thumbprint: str | None) -> dict | None:
     # has not expired yet.
     if int(time.time()) - int(claims.get("auth_time") or claims["iat"]) > session_absolute_max():
         return None
-    if claims["sub"] in _revoked_subjects:
+    if _is_revoked(claims["sub"]):
         return None
     if claims["iat"] < session_not_before(claims["sub"]):
         return None                       # admin terminated this subject's sessions
@@ -858,6 +982,7 @@ _revoked_token_jti: dict[str, float] = {}       # jti -> exp, explicit access-to
 
 def mint_oauth_access(sub: str, scope: str = "mcp", ttl: int | None = None) -> tuple[str, int, str]:
     """Mint a signed OAuth access token for `sub`. Returns (jwt, expires_in, jti)."""
+    refresh_directory()          # a role change on another instance must mint fresh claims
     if sub not in USERS:
         raise ValueError("unknown subject")
     u = USERS[sub]
@@ -878,6 +1003,7 @@ def mint_oauth_access(sub: str, scope: str = "mcp", ttl: int | None = None) -> t
 def verify_oauth_access(token: str) -> dict | None:
     """Validate an OAuth access token (no cert binding). Rejects cert-bound session
     tokens (they carry `cnf`, not `token_use:mcp_access`) and vice-versa."""
+    refresh_directory()
     try:
         claims = jwt.decode(
             token, pki.signing_public_pem(), algorithms=[_ALG],
@@ -888,9 +1014,9 @@ def verify_oauth_access(token: str) -> dict | None:
         return None
     if claims.get("token_use") != "mcp_access":
         return None
-    if claims["sub"] in _revoked_subjects:
+    if _is_revoked(claims["sub"]):
         return None
-    if claims["jti"] in _revoked_token_jti:
+    if _jti_revoked(claims["jti"]):
         return None
     if claims["iat"] < session_not_before(claims["sub"]):
         return None                       # admin terminated this subject's sessions
@@ -899,7 +1025,19 @@ def verify_oauth_access(token: str) -> dict | None:
     return claims
 
 
+def _jti_revoked(jti: str) -> bool:
+    if statestore.enabled():
+        return statestore.one("SELECT 1 FROM revoked_jti WHERE jti = %s", (jti,)) is not None
+    return jti in _revoked_token_jti
+
+
 def revoke_oauth_jti(jti: str, exp: float):
+    if statestore.enabled():
+        statestore.run("DELETE FROM revoked_jti WHERE exp < %s", (time.time(),))
+        statestore.run(
+            "INSERT INTO revoked_jti (jti, exp) VALUES (%s, %s) "
+            "ON CONFLICT (jti) DO UPDATE SET exp = EXCLUDED.exp", (jti, exp))
+        return
     with _lock:
         _gc(_revoked_token_jti)
         _revoked_token_jti[jti] = exp
@@ -916,18 +1054,29 @@ def has_factor(claims: dict, factor: str) -> bool:
 
 # ---------- revocation (identity kill-switch) ----------
 def revoke_subject(sub: str):
+    if statestore.enabled():
+        statestore.run("INSERT INTO revoked_subjects (sub) VALUES (%s) "
+                       "ON CONFLICT (sub) DO NOTHING", (sub,))
+        _revoked_cache.invalidate()
+        return
     with _lock:
         _revoked_subjects.add(sub)
         _save_revoked()
 
 
 def unrevoke_subject(sub: str):
+    if statestore.enabled():
+        statestore.run("DELETE FROM revoked_subjects WHERE sub = %s", (sub,))
+        _revoked_cache.invalidate()
+        return
     with _lock:
         _revoked_subjects.discard(sub)
         _save_revoked()
 
 
 def revoked() -> list[str]:
+    if statestore.enabled():
+        return sorted(r[0] for r in statestore.all_rows("SELECT sub FROM revoked_subjects"))
     with _lock:
         return sorted(_revoked_subjects)
 

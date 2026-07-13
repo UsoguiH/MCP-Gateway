@@ -22,10 +22,13 @@ import base64
 import json
 import time
 
-from . import audit, authz, classification, dlp, selfinfo, unicode_guard
+import anyio.to_thread
+
+from . import audit, authz, classification, dlp, selfinfo, statestore, unicode_guard
 from .approvals import ApprovalStore
 from .config import DATA_DIR, GATEWAY, clearance_rank
-from .controls import kill_switch, rate_limiter, server_limiter, tool_limiter
+from .controls import (check_rate_limits, kill_switch, rate_limiter, server_limiter,
+                       tool_limiter)
 from .mcp_manager import MCPManager
 from .registry import Registry
 from .taint import TaintStore
@@ -43,28 +46,52 @@ class Gateway:
         self.approvals = ApprovalStore()
         self.taint = TaintStore(GATEWAY["taint_min_len"])
         self.started = False
-        # circuit breaker: per-server consecutive-failure tracking -> auto-open
+        # circuit breaker: per-server consecutive-failure tracking -> auto-open.
+        # Phase 3: shared in DB mode — failures observed by one instance open the
+        # breaker for every instance (a failing server is quarantined fleet-wide).
         self._breaker: dict[str, dict] = {}
         self._breaker_threshold = GATEWAY.get("breaker_failure_threshold", 5)
         self._breaker_cooldown = GATEWAY.get("breaker_cooldown_seconds", 30)
         # admin drain: refuse NEW calls to a server while in-flight work finishes
-        # (softer than stop/kill). Persisted so a drain survives a restart.
+        # (softer than stop/kill). Persisted so a drain survives a restart; shared
+        # in DB mode so a drain on one instance drains the fleet.
         self._drain_file = DATA_DIR / "drained.json"
-        try:
-            self.drained: set[str] = set(json.loads(self._drain_file.read_text(encoding="utf-8")))
-        except Exception:
-            self.drained = set()
+        self._drain_cache = statestore.TTLCache(1.0)
+        self._breaker_cache = statestore.TTLCache(1.0)
+        self._drained_local: set[str] = set()
+        if not statestore.enabled():
+            try:
+                self._drained_local = set(
+                    json.loads(self._drain_file.read_text(encoding="utf-8")))
+            except Exception:
+                self._drained_local = set()
 
     # ---- admin drain / breaker controls ----
+    @property
+    def drained(self) -> set[str]:
+        if statestore.enabled():
+            return self._drain_cache.get(
+                lambda: {r[0] for r in statestore.all_rows("SELECT server FROM drained")})
+        return self._drained_local
+
     def _save_drained(self):
-        self._drain_file.write_text(json.dumps(sorted(self.drained)), encoding="utf-8")
+        self._drain_file.write_text(json.dumps(sorted(self._drained_local)), encoding="utf-8")
 
     def drain(self, server: str):
-        self.drained.add(server)
+        if statestore.enabled():
+            statestore.run("INSERT INTO drained (server) VALUES (%s) "
+                           "ON CONFLICT (server) DO NOTHING", (server,))
+            self._drain_cache.invalidate()
+            return
+        self._drained_local.add(server)
         self._save_drained()
 
     def undrain(self, server: str):
-        self.drained.discard(server)
+        if statestore.enabled():
+            statestore.run("DELETE FROM drained WHERE server = %s", (server,))
+            self._drain_cache.invalidate()
+            return
+        self._drained_local.discard(server)
         self._save_drained()
 
     def reset_breaker(self, server: str):
@@ -73,10 +100,33 @@ class Gateway:
 
     # ---- circuit breaker (contain a failing/compromised server) ----
     def _breaker_open(self, server: str) -> bool:
+        if statestore.enabled():
+            # Cached for 1 s like the other containment reads: this is on the hot path of
+            # every call, and a breaker that opens is allowed to take a second to reach the
+            # other instances (it opens only after repeated failures anyway). Without the
+            # cache this is a database round trip per mediated call, for a table that is
+            # almost always empty.
+            open_until = self._breaker_cache.get(
+                lambda: {s: u for s, u in
+                         statestore.all_rows("SELECT server, open_until FROM breaker")})
+            return open_until.get(server, 0) > time.time()
         b = self._breaker.get(server)
         return bool(b and b.get("open_until", 0) > time.time())
 
     def _breaker_trip(self, server: str):
+        if statestore.enabled():
+            row = statestore.one(
+                "INSERT INTO breaker (server, fails, open_until) VALUES (%s, 1, 0) "
+                "ON CONFLICT (server) DO UPDATE SET "
+                "  fails = breaker.fails + 1, "
+                "  open_until = CASE WHEN breaker.fails + 1 >= %s THEN %s "
+                "               ELSE breaker.open_until END "
+                "RETURNING fails, open_until",
+                (server, self._breaker_threshold, time.time() + self._breaker_cooldown))
+            self._breaker_cache.invalidate()
+            if row and row[0] >= self._breaker_threshold:
+                audit.record("circuit_open", server=server, cooldown_s=self._breaker_cooldown)
+            return
         b = self._breaker.setdefault(server, {"fails": 0, "open_until": 0})
         b["fails"] += 1
         if b["fails"] >= self._breaker_threshold:
@@ -84,8 +134,27 @@ class Gateway:
             audit.record("circuit_open", server=server, cooldown_s=self._breaker_cooldown)
 
     def _breaker_reset(self, server: str):
+        if statestore.enabled():
+            # A successful call is the common case: only pay a DB write when the breaker
+            # actually holds state for this server (otherwise this is a DELETE per call).
+            if self._breaker_cache.get(
+                    lambda: {s: u for s, u in
+                             statestore.all_rows("SELECT server, open_until FROM breaker")}
+            ).get(server) is None:
+                return
+            statestore.run("DELETE FROM breaker WHERE server = %s", (server,))
+            self._breaker_cache.invalidate()
+            return
         if server in self._breaker:
             self._breaker[server] = {"fails": 0, "open_until": 0}
+
+    def breaker_snapshot(self) -> dict[str, dict]:
+        """{server: {fails, open_until}} for the console/metrics/anomaly views —
+        works in both backends (main.py/anomaly must not touch _breaker directly)."""
+        if statestore.enabled():
+            return {s: {"fails": int(f), "open_until": float(u)} for s, f, u in
+                    statestore.all_rows("SELECT server, fails, open_until FROM breaker")}
+        return {s: dict(b) for s, b in self._breaker.items()}
 
     async def startup(self):
         await self.mcp.start_all()
@@ -101,11 +170,15 @@ class Gateway:
     def visible_tools(self, claims: dict) -> list[dict]:
         role_ceiling = _role_ceiling(claims)
         allowed = _role_servers(claims)
+        # ONE snapshot of the registry for the whole listing. This used to call
+        # registry.get() per tool — 243 cache checks per tools/list, any of which could
+        # trigger a re-read of the entire registry mid-loop (see Registry._maybe_reload).
+        entries = self.registry.entries
         out = []
         for t in self.mcp.all_tools():
             if allowed is not None and t["server"] not in allowed:
                 continue
-            entry = self.registry.get(t["server"], t["name"])
+            entry = entries.get(f"{t['server']}:{t['name']}")
             if not entry or entry["status"] != "active":
                 continue
             if entry["tier"] > role_ceiling:
@@ -122,32 +195,53 @@ class Gateway:
 
     # ---- a single proposed tool call goes through every control ----
     async def _execute_call(self, claims: dict, session: str, call: dict) -> dict:
+        """Run one proposed call through the pipeline.
+
+        The control pipeline is SYNCHRONOUS and, with the shared-state backend on, it is
+        I/O-bound: rate limits, containment, registry, taint and the audit chain are all
+        database round-trips. Running that on the event loop blocks EVERY other request in
+        this process for its whole duration — at 46 concurrent sessions the p95 for one
+        mediated call went from 129 ms to 5.2 s, which is not overhead, it is a queue.
+        So the blocking sections run in a worker thread and the loop stays free; only the
+        genuinely-async part (the MCP call to the backend server) awaits on the loop.
+        """
+        pre = await anyio.to_thread.run_sync(self._pre_dispatch, claims, session, call)
+        if pre.get("_terminal"):
+            return pre["step"]
+        return await self._dispatch(claims, session, pre["server"], pre["tool"],
+                                    pre["arguments"], pre["tier"])
+
+    def _pre_dispatch(self, claims: dict, session: str, call: dict) -> dict:
+        """Every control that runs BEFORE the backend is touched. Pure sync (thread-safe):
+        returns either {"_terminal": True, "step": <result>} or the cleaned call to dispatch."""
         server = call.get("server", "")
         tool = call.get("tool", "")
         arguments = call.get("arguments", {}) or {}
         user = claims["sub"]
+
+        def stop(step):
+            return {"_terminal": True, "step": step}
 
         # 0. maintenance mode: pause mediated work during a patch/migration without the
         # finality of a kill switch, and without locking admins out of the console.
         # Admins keep working so they can fix whatever the maintenance is for.
         maint = selfinfo.maintenance_status()
         if maint.get("enabled") and claims.get("role") != "admin":
-            return self._blocked(server, tool,
-                                 f"gateway in maintenance: {maint.get('message', '')}".strip(),
-                                 user, arguments)
+            return stop(self._blocked(
+                server, tool, f"gateway in maintenance: {maint.get('message', '')}".strip(),
+                user, arguments))
 
         # 1. kill switch
         blocked = kill_switch.blocked(user=user, server=server, tool=tool)
         if blocked:
-            return self._blocked(server, tool, f"kill switch active: {blocked}", user, arguments)
+            return stop(self._blocked(server, tool, f"kill switch active: {blocked}",
+                                      user, arguments))
 
-        # 2. rate limit — three independent keys
-        if not rate_limiter.allow(user):
-            return self._blocked(server, tool, "rate limit exceeded (per-user)", user, arguments)
-        if not tool_limiter.allow(f"{user}:{server}:{tool}"):
-            return self._blocked(server, tool, "rate limit exceeded (per-tool)", user, arguments)
-        if not server_limiter.allow(server):
-            return self._blocked(server, tool, "rate limit exceeded (per-server)", user, arguments)
+        # 2. rate limit — three independent keys, checked in ONE round trip when shared
+        limited = check_rate_limits(user=user, server=server, tool=tool)
+        if limited:
+            return stop(self._blocked(server, tool, f"rate limit exceeded ({limited})",
+                                      user, arguments))
 
         # 3. server entitlement (role allowlist) — the client-facing reason is identical
         # to the unknown-tool case so a non-entitled caller cannot distinguish a hidden
@@ -157,31 +251,34 @@ class Gateway:
             audit.record("blocked", user=user, server=server, tool=tool,
                          reason="server not entitled to role", role=claims.get("role", ""),
                          args_digest=audit.payload_digest(arguments))
-            return {"server": server, "tool": tool, "status": "blocked",
-                    "reason": "tool not in registry"}
+            return stop({"server": server, "tool": tool, "status": "blocked",
+                         "reason": "tool not in registry"})
 
         # 3a. registry
         entry = self.registry.get(server, tool)
         if not entry:
-            return self._blocked(server, tool, "tool not in registry", user, arguments)
+            return stop(self._blocked(server, tool, "tool not in registry", user, arguments))
 
         # 3b. circuit breaker: a server that keeps failing is temporarily quarantined
         if self._breaker_open(server):
-            return self._blocked(server, tool, "circuit open: server temporarily quarantined",
-                                 user, arguments)
+            return stop(self._blocked(server, tool,
+                                      "circuit open: server temporarily quarantined",
+                                      user, arguments))
 
         # 3c. admin drain: new calls refused while the server is being drained
         if server in self.drained:
-            return self._blocked(server, tool, "server drained by administrator", user, arguments)
+            return stop(self._blocked(server, tool, "server drained by administrator",
+                                      user, arguments))
 
         # 3d. API-key scope cap: a scoped key may never call above its tier ceiling,
         # regardless of the bound operator's role (a leaked read-only CI key cannot
         # even queue a destructive action for approval).
         cap = claims.get("tier_cap")
         if cap is not None and entry["tier"] > cap:
-            return self._blocked(server, tool,
-                                 f"API key scope '{claims.get('scope')}' caps risk tier at {cap}",
-                                 user, arguments)
+            return stop(self._blocked(
+                server, tool,
+                f"API key scope '{claims.get('scope')}' caps risk tier at {cap}",
+                user, arguments))
 
         # 4. Unicode sanitize arguments
         clean_args, arg_flags = unicode_guard.sanitize_obj(arguments)
@@ -190,13 +287,15 @@ class Gateway:
         # 5. size limits
         for k, v in clean_args.items():
             if isinstance(v, str) and len(v) > MAX_ARG:
-                return self._blocked(server, tool, f"argument '{k}' exceeds size limit", user, clean_args)
+                return stop(self._blocked(server, tool,
+                                          f"argument '{k}' exceeds size limit", user, clean_args))
 
         # 5b. strict schema validation (W9.6): args must match the tool's declared
         # input schema with additionalProperties=false — no unexpected/typo'd fields.
         ok, why = _validate_args(self.mcp.find_tool(server, tool), clean_args)
         if not ok:
-            return self._blocked(server, tool, f"argument schema violation: {why}", user, clean_args)
+            return stop(self._blocked(server, tool, f"argument schema violation: {why}",
+                                      user, clean_args))
 
         # 6. taint
         taint_hits = self.taint.check_args(session, clean_args)
@@ -213,9 +312,9 @@ class Gateway:
         )
 
         if decision.outcome == "deny":
-            return {"server": server, "tool": tool, "status": "denied",
-                    "reason": decision.reason, "tier": decision.tier,
-                    "taint": taint_hits, "unicode_flags": arg_flags}
+            return stop({"server": server, "tool": tool, "status": "denied",
+                         "reason": decision.reason, "tier": decision.tier,
+                         "taint": taint_hits, "unicode_flags": arg_flags})
 
         if decision.outcome == "approve":
             preview = _preview(server, tool, clean_args, taint_hits)
@@ -227,13 +326,15 @@ class Gateway:
             audit.record("approval_requested", user=user, server=server, tool=tool,
                          approval_id=appr["id"], tier=decision.tier,
                          approvals_required=decision.approvals_required)
-            return {"server": server, "tool": tool, "status": "pending_approval",
-                    "approval_id": appr["id"], "tier": decision.tier,
-                    "approvals_required": decision.approvals_required,
-                    "preview": preview, "taint": taint_hits, "reason": decision.reason}
+            return stop({"server": server, "tool": tool, "status": "pending_approval",
+                         "approval_id": appr["id"], "tier": decision.tier,
+                         "approvals_required": decision.approvals_required,
+                         "preview": preview, "taint": taint_hits,
+                         "reason": decision.reason})
 
-        # allow -> dispatch
-        return await self._dispatch(claims, session, server, tool, clean_args, decision.tier)
+        # allow -> the caller dispatches (that part is genuinely async)
+        return {"_terminal": False, "server": server, "tool": tool,
+                "arguments": clean_args, "tier": decision.tier}
 
     async def execute_approved(self, approval: dict, claims_by_user: dict) -> dict:
         """Run a call that has cleared HITL. Uses the *requester's* clearance for DLP,
@@ -250,7 +351,7 @@ class Gateway:
     async def _dispatch(self, claims, session, server, tool, arguments, tier, approved_id=None):
         # Vault: mint a short-lived, per-(server,user) credential and inject it into
         # the call. The secret is never in model context and never in the audit payload.
-        cred = vault.issue(server, claims["sub"]) if vault.manages(server) else None
+        cred = await anyio.to_thread.run_sync(self._issue_credential, server, claims["sub"])
         call_args = dict(arguments)
         if cred:
             call_args[_INJECTED_PARAM] = cred["secret"]
@@ -262,15 +363,30 @@ class Gateway:
             raw, blocks = await self.mcp.call(server, tool, call_args)
         except Exception as exc:
             duration_ms = round((time.perf_counter() - t0) * 1000, 1)
-            if cred:
-                vault.revoke(cred["lease"])
-            self._breaker_trip(server)          # circuit breaker: track failures
-            audit.record("tool_error", user=claims["sub"], server=server, tool=tool,
-                         error=str(exc)[:200], duration_ms=duration_ms)
-            return {"server": server, "tool": tool, "status": "error",
-                    "reason": f"tool call failed: {exc}", "tier": tier,
-                    "duration_ms": duration_ms}
+            return await anyio.to_thread.run_sync(
+                self._after_error, claims, server, tool, tier, cred, str(exc), duration_ms)
         duration_ms = round((time.perf_counter() - t0) * 1000, 1)
+        # Result governance + the audit append are DB-bound too: off the loop (see
+        # _execute_call), or one slow chain append stalls every other in-flight request.
+        return await anyio.to_thread.run_sync(
+            self._after_call, claims, session, server, tool, arguments, tier,
+            approved_id, cred, raw, blocks, duration_ms)
+
+    def _issue_credential(self, server: str, sub: str) -> dict | None:
+        return vault.issue(server, sub) if vault.manages(server) else None
+
+    def _after_error(self, claims, server, tool, tier, cred, err, duration_ms) -> dict:
+        if cred:
+            vault.revoke(cred["lease"])
+        self._breaker_trip(server)              # circuit breaker: track failures
+        audit.record("tool_error", user=claims["sub"], server=server, tool=tool,
+                     error=err[:200], duration_ms=duration_ms)
+        return {"server": server, "tool": tool, "status": "error",
+                "reason": f"tool call failed: {err}", "tier": tier,
+                "duration_ms": duration_ms}
+
+    def _after_call(self, claims, session, server, tool, arguments, tier, approved_id,
+                    cred, raw, blocks, duration_ms) -> dict:
         self._breaker_reset(server)
         if cred:
             audit.record("credential_injected", user=claims["sub"], server=server, tool=tool,

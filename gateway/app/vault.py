@@ -12,11 +12,13 @@ in HSM. The injection mechanism above the vault is unchanged.
 """
 import hashlib
 import hmac
+import json
 import os
 import threading
 import time
 import uuid
 
+from . import statestore
 from .config import CONFIG
 
 
@@ -46,10 +48,22 @@ class Vault:
         exp = time.time() + ttl
         # dev secret: deterministic per lease, never persisted in cleartext
         secret = hmac.new(self._base, f"{server}:{user}:{lease}".encode(), hashlib.sha256).hexdigest()
-        with self._lock:
-            self._leases[lease] = {"server": server, "user": user, "exp": exp}
-            self._gc()
+        self._store_lease(lease, {"server": server, "user": user, "exp": exp})
         return {"lease": lease, "secret": secret, "exp": exp}
+
+    def _store_lease(self, lease: str, meta: dict):
+        """Track a lease (the console's vault page). Shared backend when on, so an
+        admin sees every instance's live leases; only metadata is stored — never
+        the secret itself."""
+        if statestore.enabled():
+            statestore.run(
+                "INSERT INTO vault_leases (lease, exp, doc) VALUES (%s, %s, %s) "
+                "ON CONFLICT (lease) DO UPDATE SET exp = EXCLUDED.exp, doc = EXCLUDED.doc",
+                (lease, meta["exp"], json.dumps(meta)))
+            return
+        with self._lock:
+            self._leases[lease] = meta
+            self._gc()
 
     def _issue_openbao(self, server: str, user: str, spec: dict) -> dict:
         """Production path: dynamic DB credentials from OpenBao's database engine.
@@ -63,16 +77,18 @@ class Vault:
         role = spec.get("openbao_role", server)
         resp = client.secrets.database.generate_credentials(name=role)
         data, lease = resp["data"], resp["lease_id"]
-        with self._lock:
-            self._leases[lease] = {"server": server, "user": user,
-                                   "exp": time.time() + resp.get("lease_duration", 300)}
+        self._store_lease(lease, {"server": server, "user": user,
+                                  "exp": time.time() + resp.get("lease_duration", 300)})
         # secret = the dynamic DB user:password (never in model context/audit)
         return {"lease": lease, "secret": f"{data['username']}:{data['password']}",
                 "exp": time.time() + resp.get("lease_duration", 300)}
 
     def revoke(self, lease: str):
-        with self._lock:
-            self._leases.pop(lease, None)
+        if statestore.enabled():
+            statestore.run("DELETE FROM vault_leases WHERE lease = %s", (lease,))
+        else:
+            with self._lock:
+                self._leases.pop(lease, None)
         if self.provider == "openbao":
             try:
                 import hvac
@@ -83,6 +99,11 @@ class Vault:
 
     def active_leases(self) -> list[dict]:
         now = time.time()
+        if statestore.enabled():
+            statestore.run("DELETE FROM vault_leases WHERE exp < %s", (now,))
+            return [{"lease": lease, "server": doc["server"], "user": doc["user"],
+                     "expires_in": round(exp - now)} for lease, exp, doc in
+                    statestore.all_rows("SELECT lease, exp, doc FROM vault_leases")]
         with self._lock:
             self._gc()
             return [{"lease": k, "server": v["server"], "user": v["user"],

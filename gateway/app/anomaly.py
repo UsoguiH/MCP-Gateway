@@ -57,7 +57,7 @@ def evaluate(gw, *, window: int | None = None, approval_sla_seconds: int | None 
 
     # 2. Circuit breakers open — a server is failing or quarantined.
     if on("breaker_open"):
-        for server, b in gw._breaker.items():
+        for server, b in gw.breaker_snapshot().items():
             if gw._breaker_open(server):
                 alerts.append(_mk("critical", f"breaker:{server}",
                                   f"Circuit breaker open — {server}",

@@ -1,0 +1,153 @@
+# High-availability stack — Phase 3 "state & scale".
+#
+#   * postgres      : appdb (demo system-of-record) + gwstate (SHARED gateway state)
+#   * gateway-a/b   : two identical gateway instances; all durable + runtime state
+#                     lives in gwstate, so either instance can serve any request
+#                     and killing one drops zero sessions
+#   * proxy (nginx) : mTLS terminator + round-robin LB with passive health
+#                     ejection — the ONLY exposed entry point
+#
+# Bring up with:
+#   docker compose -f docker-compose.ha.yml up --build -d
+#
+# Requires everything the prod stack requires PLUS deploy/secrets/gwstate_pw and
+# deploy/secrets/gwstate_url (scripts/create_gwstate.ps1 generates both; on a
+# FRESH pgdata volume deploy/postgres_init/02_gwstate.sh creates the database).
+#
+# Portability (D5): host paths are variables so the same file runs on the future
+# Linux nodes — set SHARES_PATH and GITEA_URL per host; nothing else is host-bound.
+# The instances share ONE gw-pki volume (the token-signing key must be identical,
+# or tokens minted by A would be refused by B) and keep per-instance gw-data
+# volumes (only node-local files remain there: the SIEM feed and server.log).
+
+x-gateway: &gateway
+  build: .
+  image: mcp-gateway:ha
+  depends_on:
+    postgres:
+      condition: service_healthy
+  environment: &gateway-env
+    MCP_ENV: "production"
+    MCP_TRUSTED_PROXY: "1"
+    MCP_GATEWAY_KEK_FILE: /run/secrets/kek
+    MCP_AUDIT_KEY_FILE: /run/secrets/audit_key
+    MCP_VAULT_KEY_FILE: /run/secrets/vault_key
+    MCP_MFA_KEY_FILE: /run/secrets/mfa_key
+    MCP_PROXY_SHARED_SECRET_FILE: /run/secrets/proxy_secret
+    # Phase 3: the shared-state database. With this set, sessions, approvals,
+    # audit, rate windows, breaker, taint, identities — everything — is shared.
+    MCP_STATE_DB_URL_FILE: /run/secrets/gwstate_url
+    POSTGRES_URL: "postgresql://mcp_login:${MCP_APP_PASSWORD}@postgres:5432/appdb"
+    POSTGRES_ROLE: "mcp_app"
+    POSTGRES_APPNAME: "mcp-gateway"
+    DOCS_ROOTS: >-
+      [{"name":"public","path":"/shares/public","classification":"public",
+        "description":"Company-wide documents"},
+       {"name":"policies","path":"/shares/policies","classification":"restricted",
+        "description":"IT & HR policies"},
+       {"name":"hr","path":"/shares/hr","classification":"secret",
+        "description":"HR operations"}]
+    GITEA_URL: "${GITEA_URL:-http://host.docker.internal:3000}"
+    GITEA_TOKEN_FILE: /run/secrets/gitea_token
+    BROWSER_ALLOWED_DOMAINS: "${BROWSER_ALLOWED_DOMAINS:-}"
+    QDRANT_URL: "${QDRANT_URL:-}"
+    QDRANT_COLLECTIONS: "${QDRANT_COLLECTIONS:-}"
+  secrets:
+    - kek
+    - audit_key
+    - vault_key
+    - mfa_key
+    - proxy_secret
+    - gitea_token
+    - gwstate_url
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
+  expose:
+    - "8800"
+  command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0",
+            "--port", "8800", "--proxy-headers", "--forwarded-allow-ips", "*"]
+  healthcheck:
+    test: ["CMD-SHELL", "python -c \"import urllib.request,sys,json; r=json.load(urllib.request.urlopen('http://127.0.0.1:8800/api/health', timeout=5)); sys.exit(0 if r.get('state_ok') else 1)\""]
+    interval: 15s
+    timeout: 10s
+    retries: 4
+    start_period: 60s
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: appdb
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_superuser_pw
+      MCP_APP_PASSWORD: ${MCP_APP_PASSWORD}
+    secrets:
+      - pg_superuser_pw
+      - gwstate_pw
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/postgres_init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d appdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+  gateway-a:
+    <<: *gateway
+    environment:
+      <<: *gateway-env
+      MCP_INSTANCE_ID: "gw-a"
+    volumes:
+      - gw-data-a:/app/data
+      - gw-pki:/app/pki
+      - ${SHARES_PATH:-D:/Shares}:/shares:ro
+      - ./config.prod.yaml:/app/config.yaml:ro   # prod config (no dev fixtures)
+
+  gateway-b:
+    <<: *gateway
+    environment:
+      <<: *gateway-env
+      MCP_INSTANCE_ID: "gw-b"
+    volumes:
+      - gw-data-b:/app/data
+      - gw-pki:/app/pki
+      - ${SHARES_PATH:-D:/Shares}:/shares:ro
+      - ./config.prod.yaml:/app/config.yaml:ro   # prod config (no dev fixtures)
+
+  proxy:
+    image: nginx:1.27
+    depends_on:
+      - gateway-a
+      - gateway-b
+    ports:
+      - "8443:8443"   # HTTPS + mTLS — the only exposed port
+      - "8080:8080"   # redirects to HTTPS
+    volumes:
+      - ./deploy/nginx.ha.conf:/etc/nginx/templates/nginx.conf.template:ro
+      - ./deploy/tls:/etc/nginx/tls:ro
+    secrets:
+      - proxy_secret
+    command: >
+      /bin/sh -c "export MCP_PROXY_SHARED_SECRET=$$(cat /run/secrets/proxy_secret);
+      envsubst '$$MCP_PROXY_SHARED_SECRET' < /etc/nginx/templates/nginx.conf.template
+      > /etc/nginx/nginx.conf; exec nginx -g 'daemon off;'"
+    restart: unless-stopped
+
+secrets:
+  kek:             { file: ./deploy/secrets/kek }
+  audit_key:       { file: ./deploy/secrets/audit_key }
+  vault_key:       { file: ./deploy/secrets/vault_key }
+  mfa_key:         { file: ./deploy/secrets/mfa_key }
+  proxy_secret:    { file: ./deploy/secrets/proxy_secret }
+  pg_superuser_pw: { file: ./deploy/secrets/pg_superuser_pw }
+  gitea_token:     { file: ./deploy/secrets/gitea_token }
+  gwstate_pw:      { file: ./deploy/secrets/gwstate_pw }
+  gwstate_url:     { file: ./deploy/secrets/gwstate_url }
+
+volumes:
+  pgdata:
+  gw-data-a:
+  gw-data-b:
+  gw-pki:

@@ -45,13 +45,36 @@ function Test-SameVolume($pathA, $pathB) {
 }
 
 try {
-    # 1. Postgres dump (via cmd so redirect writes raw bytes, not UTF-16)
+    # 0. Cluster GLOBALS (roles + their grants). Roles live in the CLUSTER, not in a
+    # database, so a per-database pg_dump only REFERENCES them ("GRANT ... TO mcp_app")
+    # and never creates them. Restoring appdb.sql into a fresh server therefore failed
+    # with 'role "mcp_app" does not exist' — i.e. the backup was not restorable. The
+    # monthly restore drill (scripts/restore_drill.ps1) is what caught it.
+    cmd /c "docker exec gateway-postgres-1 pg_dumpall -U postgres --globals-only > `"$destDir\globals.sql`""
+    if ($LASTEXITCODE -ne 0) { throw "pg_dumpall --globals-only failed ($LASTEXITCODE)" }
+
+    # 1. Postgres dumps (via cmd so redirect writes raw bytes, not UTF-16)
     cmd /c "docker exec gateway-postgres-1 pg_dump -U postgres -d appdb > `"$destDir\appdb.sql`""
     if ($LASTEXITCODE -ne 0) { throw "pg_dump failed ($LASTEXITCODE)" }
+    # 1b. gwstate — the Phase-3 shared gateway state (audit chain, approvals,
+    # identities, registry). Skipped cleanly on stacks that predate it.
+    $hasGwstate = docker exec gateway-postgres-1 psql -U postgres -tA -c "SELECT 1 FROM pg_database WHERE datname='gwstate'"
+    if ($hasGwstate -match '1') {
+        cmd /c "docker exec gateway-postgres-1 pg_dump -U postgres -d gwstate > `"$destDir\gwstate.sql`""
+        if ($LASTEXITCODE -ne 0) { throw "gwstate pg_dump failed ($LASTEXITCODE)" }
+    }
 
-    # 2 + 3. Gateway docker volumes -> tarballs
-    docker run --rm -v gateway_gw-data:/data -v "${destDir}:/backup" alpine tar czf /backup/gw-data.tgz -C /data .
-    if ($LASTEXITCODE -ne 0) { throw "gw-data archive failed" }
+    # 2 + 3. Gateway docker volumes -> tarballs. The HA stack (Phase 3) has
+    # per-instance data volumes (gw-data-a / gw-data-b); archive whichever exist.
+    $volumes = docker volume ls --format '{{.Name}}'
+    $dataVols = @('gateway_gw-data', 'gateway_gw-data-a', 'gateway_gw-data-b') |
+        Where-Object { $volumes -contains $_ }
+    if (-not $dataVols) { throw "no gw-data volume found" }
+    foreach ($vol in $dataVols) {
+        $tarName = $vol.Replace('gateway_', '')
+        docker run --rm -v "${vol}:/data" -v "${destDir}:/backup" alpine tar czf "/backup/$tarName.tgz" -C /data .
+        if ($LASTEXITCODE -ne 0) { throw "$vol archive failed" }
+    }
     docker run --rm -v gateway_gw-pki:/data -v "${destDir}:/backup" alpine tar czf /backup/gw-pki.tgz -C /data .
     if ($LASTEXITCODE -ne 0) { throw "gw-pki archive failed" }
 

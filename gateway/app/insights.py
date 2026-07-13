@@ -35,11 +35,8 @@ _cache: dict = {"sig": None, "records": []}
 
 
 def _log_signature():
-    try:
-        st = audit._LOG.stat()
-        return (st.st_size, st.st_mtime_ns)
-    except OSError:
-        return None
+    # Backend-aware (Phase 3): file mode keys on (size, mtime); DB mode on max(seq).
+    return audit.log_signature()
 
 
 def _records(limit: int = _MAX_SCAN) -> list[dict]:

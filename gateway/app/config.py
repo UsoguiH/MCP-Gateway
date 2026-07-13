@@ -32,6 +32,39 @@ def secret(name: str, default: str | None = None) -> str | None:
     return os.environ.get(name, default)
 
 
+# A container secrets mount is not a cheap read: on Docker Desktop's filesystem layer,
+# one open+read+decode of /run/secrets/<x> measured 2.7 ms. That is fine once at boot and
+# ruinous on a hot path — and secret() WAS on several: statestore.enabled() resolved the
+# state-DB URL on every store call (dozens per mediated request), and audit._audit_key()
+# re-read the HMAC key for every hash, i.e. once per record while verifying the chain.
+# The gateway was spending most of its "database time" reading a file, while the database
+# itself answered in 0.13 ms.
+#
+# A file-mounted secret cannot change without restarting the process that mounted it, so
+# it is resolved ONCE. Rotation is a restart — which it already was.
+_secret_cache: dict[tuple[str, str | None], str | None] = {}
+_secret_lock = __import__("threading").Lock()
+
+
+def secret_cached(name: str, default: str | None = None) -> str | None:
+    """`secret()` resolved once per process. Use on any path that runs per request."""
+    key = (name, default)
+    try:
+        return _secret_cache[key]
+    except KeyError:
+        pass
+    value = secret(name, default)               # may raise ConfigError — never cache that
+    with _secret_lock:
+        _secret_cache[key] = value
+    return value
+
+
+def clear_secret_cache():
+    """Tests (and a deliberate in-process re-read) drop the resolved secrets."""
+    with _secret_lock:
+        _secret_cache.clear()
+
+
 def _require(obj: dict, path: str, typ=None):
     cur = obj
     for part in path.split("."):
