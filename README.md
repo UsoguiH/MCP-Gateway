@@ -85,7 +85,7 @@ Demo operators: `sara` (employee) · `khalid` (analyst) · `noura` / `faisal` (a
 
 ### 🔌 Connect your AI
 
-Open **`/connect`** in the console — the wizard generates a ready-to-paste config for Claude Code, LM Studio, or any OAuth-capable MCP client. Clients speak MCP (Streamable HTTP) to `POST /mcp`. Full guide: [`gateway/docs/CONNECT-YOUR-AI.md`](../gateway/docs/CONNECT-YOUR-AI.md).
+Open **`/connect`** in the console — the wizard generates a ready-to-paste config for Claude Code, LM Studio, or any OAuth-capable MCP client. Clients speak MCP (Streamable HTTP) to `POST /mcp`. Full guide: [`gateway/docs/CONNECT-YOUR-AI.md`](gateway/docs/CONNECT-YOUR-AI.md).
 
 ## 🧪 Testing
 
@@ -165,7 +165,7 @@ The gateway runs in one of **two state modes** — the code is identical, only t
 
 - 🔑 Secrets are Docker **file-secrets** in `deploy/secrets/` — never in images, never in git. Production tripwires make dev secrets fatal.
 - 💾 Backups: `scripts/backup.ps1` daily (pg_dump + data + PKI + Gitea, 14-day retention, `-Offsite` mirror). Restore drill: `scripts/restore_drill.ps1` — **run monthly**; measured RTO 38.7 s.
-- 📖 Full procedures: [`gateway/OPERATIONS.md`](../gateway/OPERATIONS.md).
+- 📖 Full procedures: [`gateway/OPERATIONS.md`](gateway/OPERATIONS.md).
 
 ## 📊 Project status
 
@@ -198,12 +198,13 @@ The defining accepted-pending risk: **R1 — the gateway authenticates the perso
 
 | Document | Read it for |
 |---|---|
-| 📘 `MCP-Gateway-Documentation.docx` *(this folder)* | **The full picture, in plain language** — concepts, architecture, what was built phase by phase, module reference, ops, risks, roadmap |
-| ⭐ [`gateway/PROJECT-PLAN.md`](../gateway/PROJECT-PLAN.md) | Canonical status, risk register, org decisions, phase exit criteria |
-| ⭐ [`gateway/OPERATIONS.md`](../gateway/OPERATIONS.md) | Runbook: bootstrap → backups → HA failure modes → incident response |
-| [`gateway/README.md`](../gateway/README.md) | Technical controls table, demo walkthrough, production swap points |
-| [`gateway/docs/CONNECT-YOUR-AI.md`](../gateway/docs/CONNECT-YOUR-AI.md) | End-user guide: connecting an AI client |
-| Repo-root `MCP-*.md` | Design/research corpus (background — the plan supersedes it) |
+| 📘 [`handover/MCP-Gateway-Documentation.docx`](handover/MCP-Gateway-Documentation.docx) | **The full picture, in plain language** — concepts, architecture, what was built phase by phase, module reference, ops, risks, roadmap |
+| ⭐ [`gateway/PROJECT-PLAN.md`](gateway/PROJECT-PLAN.md) | Canonical status, risk register, org decisions, phase exit criteria |
+| ⭐ [`gateway/OPERATIONS.md`](gateway/OPERATIONS.md) | Runbook: bootstrap → backups → HA failure modes → incident response |
+| [`gateway/README.md`](gateway/README.md) | Technical controls table, demo walkthrough, production swap points |
+| [`gateway/docs/CONNECT-YOUR-AI.md`](gateway/docs/CONNECT-YOUR-AI.md) | End-user guide: connecting an AI client |
+| [`docs/design/`](docs/design/) | Design/research corpus — architecture BuildSpecs, security blueprint, auth redesign (background — the plan supersedes it) |
+| [`docs/research/`](docs/research/) | STORM research briefings (MCP server landscape, company stacks) |
 
 **Suggested first week:** this README → the docx → `PROJECT-PLAN.md` → `app/gateway.py` top-to-bottom → `OPERATIONS.md` → `tests/test_e2e.py`.
 
