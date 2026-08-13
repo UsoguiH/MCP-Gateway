@@ -57,3 +57,6 @@ gateway/data/
 
 # opendata-mcp is its own repository (gitea: adel/open-data-mcp) — not a submodule
 opendata-mcp/
+
+# Screen recordings (not project source)
+*.mp4

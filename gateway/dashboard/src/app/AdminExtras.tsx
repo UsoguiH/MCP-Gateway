@@ -8,6 +8,7 @@ import { Search, Radio, HeartPulse, Eye, X } from "lucide-react";
 import { useApi } from "./useApi";
 import { apiGet } from "@/api";
 import { Modal, GhostBtn, SelectInput } from "./ui";
+import { t } from "./i18n";
 
 function fmtTime(ts?: number) { return ts ? new Date(ts * 1000).toTimeString().slice(0, 8) : "—"; }
 function ms(v?: number | null) { return v == null ? "—" : v >= 1000 ? `${(v / 1000).toFixed(2)}s` : `${Math.round(v)}ms`; }
@@ -69,43 +70,43 @@ export function ActivityPage({ query, onAuthExpired }: { query: string; onAuthEx
   return (
     <>
       <div className="flex items-center justify-between">
-        <h1 className="text-sm font-semibold text-black">Live Activity</h1>
+        <h1 className="text-sm font-semibold text-black">{t("Live Activity", "النشاط المباشر")}</h1>
         <div className="flex items-center gap-2">
           <span className="flex items-center gap-1.5 text-xs text-black/50">
             <Radio size={13} className={paused ? "text-black/30" : "text-[#4AA785]"} />
-            {paused ? "paused" : "live · every 3s"}
+            {paused ? t("paused", "متوقف مؤقتًا") : t("live · every 3s", "مباشر · كل 3 ثوانٍ")}
           </span>
-          <GhostBtn onClick={() => setPaused((p) => !p)}>{paused ? "Resume" : "Pause"}</GhostBtn>
+          <GhostBtn onClick={() => setPaused((p) => !p)}>{paused ? t("Resume", "استئناف") : t("Pause", "إيقاف مؤقت")}</GhostBtn>
         </div>
       </div>
 
       <div className="flex gap-3 flex-wrap items-end">
         <label className="flex flex-col gap-1">
-          <span className="text-xs text-black/50">Watch</span>
+          <span className="text-xs text-black/50">{t("Watch", "مراقبة")}</span>
           <SelectInput value={subject} onChange={(e) => setSubject(e.target.value)}>
-            <option value="">Everyone</option>
+            <option value="">{t("Everyone", "الجميع")}</option>
             {(subjects?.subjects || []).map((s) => (
               <option key={s.subject} value={s.subject}>
-                {s.subject}{s.live ? " · online" : ""} ({s.events} events)
+                {s.subject}{s.live ? t(" · online", " · متصل") : ""} ({s.events} {t("events", "أحداث")})
               </option>
             ))}
           </SelectInput>
         </label>
         <div className="flex flex-col gap-1">
-          <span className="text-xs text-black/50">Online now</span>
+          <span className="text-xs text-black/50">{t("Online now", "متصل الآن")}</span>
           <div className="flex gap-1 flex-wrap">
             {activeNow.length ? activeNow.map((u) => (
               <button key={u} onClick={() => setSubject(u)}
                 className="text-xs px-2 py-1 rounded-full bg-[#e3f4ec] text-[#1F7A5C] hover:opacity-80">
                 {u}
               </button>
-            )) : <span className="text-xs text-black/30 py-1">no active sessions</span>}
+            )) : <span className="text-xs text-black/30 py-1">{t("no active sessions", "لا توجد جلسات نشطة")}</span>}
           </div>
         </div>
       </div>
 
-      <Card title={subject ? `${subject}'s AI — live` : "All activity — live"}>
-        {shown.length === 0 ? <Empty label="Waiting for activity…" /> : (
+      <Card title={subject ? t(`${subject}'s AI — live`, `${subject} — الذكاء الاصطناعي مباشر`) : t("All activity — live", "كل النشاط — مباشر")}>
+        {shown.length === 0 ? <Empty label={t("Waiting for activity…", "في انتظار النشاط…")} /> : (
           <div className="flex flex-col">
             {shown.map((e, i) => (
               <div key={i} className="flex items-center gap-3 py-2 border-t border-black/5 first:border-t-0 text-sm">
@@ -116,7 +117,7 @@ export function ActivityPage({ query, onAuthExpired }: { query: string; onAuthEx
                   {e.tool ? `${e.tool}${e.server ? " · " + e.server : ""}` : (e.server || e.reason || "—")}
                 </span>
                 {e.tier != null && <span className="text-xs text-black/40 shrink-0">t{e.tier}</span>}
-                {e.pii_masked && <span className="text-xs px-1.5 py-0.5 rounded bg-[#edeefc] text-[#4b4fa6] shrink-0">masked</span>}
+                {e.pii_masked && <span className="text-xs px-1.5 py-0.5 rounded bg-[#edeefc] text-[#4b4fa6] shrink-0">{t("masked", "مخفي")}</span>}
                 {e.duration_ms != null && <span className="text-xs text-black/40 w-[52px] text-right shrink-0">{ms(e.duration_ms)}</span>}
               </div>
             ))}
@@ -135,37 +136,37 @@ export function ServerHealth() {
   const [busy, setBusy] = useState(false);
   const refresh = async () => { setBusy(true); await reload(); setBusy(false); };
 
-  const tone = (b: string) => b === "up" ? { bg: "#e3f4ec", fg: "#1F7A5C", label: "reachable" }
-    : b === "down" ? { bg: "#fbe6e6", fg: "#B03A36", label: "UNREACHABLE" }
-    : b === "unknown" ? { bg: "rgba(0,0,0,0.05)", fg: "rgba(0,0,0,0.5)", label: "process only" }
-    : { bg: "#fdf3e0", fg: "#8a6100", label: "stopped" };
+  const tone = (b: string) => b === "up" ? { bg: "#e3f4ec", fg: "#1F7A5C", label: t("reachable", "قابل للوصول") }
+    : b === "down" ? { bg: "#fbe6e6", fg: "#B03A36", label: t("UNREACHABLE", "غير قابل للوصول") }
+    : b === "unknown" ? { bg: "rgba(0,0,0,0.05)", fg: "rgba(0,0,0,0.5)", label: t("process only", "العملية فقط") }
+    : { bg: "#fdf3e0", fg: "#8a6100", label: t("stopped", "متوقف") };
 
   const s = data?.summary || {};
   return (
-    <Card title="Backend health — is each connector's data source actually reachable?"
+    <Card title={t("Backend health — is each connector's data source actually reachable?", "سلامة الخلفية — هل مصدر بيانات كل موصل قابل للوصول فعليًا؟")}
       right={<div className="flex items-center gap-2">
-        {data && <span className="text-xs text-black/40">{s.up || 0} up · {s.down || 0} down</span>}
-        <GhostBtn onClick={refresh}>{busy ? "Probing…" : "Probe now"}</GhostBtn>
+        {data && <span className="text-xs text-black/40">{s.up || 0} {t("up", "فعّال")} · {s.down || 0} {t("down", "متعطل")}</span>}
+        <GhostBtn onClick={refresh}>{busy ? t("Probing…", "جارٍ الفحص…") : t("Probe now", "افحص الآن")}</GhostBtn>
       </div>}>
-      {loading && !data ? <Empty label="Probing backends…" /> : (
+      {loading && !data ? <Empty label={t("Probing backends…", "جارٍ فحص الخلفيات…")} /> : (
         <table className="w-full">
           <thead><tr>
-            <th className="text-xs text-black/40 font-normal pb-2 text-left">Server</th>
-            <th className="text-xs text-black/40 font-normal pb-2 text-left">Backend</th>
-            <th className="text-xs text-black/40 font-normal pb-2 text-right">Latency</th>
-            <th className="text-xs text-black/40 font-normal pb-2 text-left pl-4">Detail</th>
+            <th className="text-xs text-black/40 font-normal pb-2 text-left">{t("Server", "الخادم")}</th>
+            <th className="text-xs text-black/40 font-normal pb-2 text-left">{t("Backend", "الخلفية")}</th>
+            <th className="text-xs text-black/40 font-normal pb-2 text-right">{t("Latency", "زمن الاستجابة")}</th>
+            <th className="text-xs text-black/40 font-normal pb-2 text-left pl-4">{t("Detail", "التفاصيل")}</th>
           </tr></thead>
           <tbody>
             {(data?.servers || []).map((p: any) => {
-              const t = tone(p.backend);
+              const tn = tone(p.backend);
               return (
-                <tr key={p.server} className="hover:bg-black/[0.02]">
+                <tr key={p.server} className="hover:bg-black/[0.04]">
                   <td className="text-sm text-black py-2 border-t border-black/5">{p.server}</td>
                   <td className="py-2 border-t border-black/5">
-                    <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: t.bg, color: t.fg }}>{t.label}</span>
+                    <span className="text-xs px-2 py-0.5 rounded-full" style={{ background: tn.bg, color: tn.fg }}>{tn.label}</span>
                   </td>
                   <td className="text-sm text-black/60 py-2 border-t border-black/5 text-right tabular-nums">{ms(p.latency_ms)}</td>
-                  <td className="text-xs text-black/40 py-2 border-t border-black/5 pl-4 max-w-[340px] truncate">{p.detail || (p.probe ? `probe: ${p.probe}` : "")}</td>
+                  <td className="text-xs text-black/40 py-2 border-t border-black/5 pl-4 max-w-[340px] truncate">{p.detail || (p.probe ? t(`probe: ${p.probe}`, `الفحص: ${p.probe}`) : "")}</td>
                 </tr>
               );
             })}
@@ -184,19 +185,19 @@ export function SeeAsModal({ sub, role, onClose }: { sub?: string; role?: string
   const [err, setErr] = useState("");
   useEffect(() => {
     const qs = sub ? `sub=${encodeURIComponent(sub)}` : `role=${encodeURIComponent(role || "")}`;
-    apiGet<any>(`/api/admin/preview?${qs}`).then((d) => d ? setData(d) : setErr("could not load"))
-      .catch(() => setErr("could not load"));
+    apiGet<any>(`/api/admin/preview?${qs}`).then((d) => d ? setData(d) : setErr(t("could not load", "تعذر التحميل")))
+      .catch(() => setErr(t("could not load", "تعذر التحميل")));
   }, [sub, role]);
 
   return (
-    <Modal title={`See as — ${sub || role}`} onClose={onClose} width={560}>
-      {err ? <Empty label={err} /> : !data ? <Empty label="Loading…" /> : (
+    <Modal title={t(`See as — ${sub || role}`, `عرض بصفة — ${sub || role}`)} onClose={onClose} width={560}>
+      {err ? <Empty label={err} /> : !data ? <Empty label={t("Loading…", "جارٍ التحميل…")} /> : (
         <div className="flex flex-col gap-3">
           <div className="flex items-center gap-2 text-xs">
             <span className="px-2 py-0.5 rounded-full bg-[#edeefc] text-[#4b4fa6]">{data.as}</span>
-            <span className="text-black/50">clearance {data.clearance}</span>
-            <span className="text-black/50">· can request up to tier {data.max_tool_tier}</span>
-            <span className="text-black/50 ml-auto">{data.visible_tool_count} tools visible</span>
+            <span className="text-black/50">{t("clearance ", "التصريح ")}{data.clearance}</span>
+            <span className="text-black/50">{t("· can request up to tier ", "· يمكنه الطلب حتى المستوى ")}{data.max_tool_tier}</span>
+            <span className="text-black/50 ml-auto">{data.visible_tool_count} {t("tools visible", "أداة مرئية")}</span>
           </div>
           <div className="flex flex-col gap-2 max-h-[46vh] overflow-y-auto">
             {Object.entries(data.by_server || {}).map(([server, tools]: any) => (
@@ -211,12 +212,12 @@ export function SeeAsModal({ sub, role, onClose }: { sub?: string; role?: string
                 </div>
               </div>
             ))}
-            {Object.keys(data.by_server || {}).length === 0 && <Empty label="This role sees no tools." />}
+            {Object.keys(data.by_server || {}).length === 0 && <Empty label={t("This role sees no tools.", "هذا الدور لا يرى أي أدوات.")} />}
           </div>
           {data.blocked_servers?.length > 0 && (
             <div className="text-xs text-black/50">
-              <span className="text-[#B03A36]">Cannot reach:</span> {data.blocked_servers.join(", ")}
-              <span className="text-black/30"> — servers this role is not entitled to (invisible to them).</span>
+              <span className="text-[#B03A36]">{t("Cannot reach:", "غير قادر على الوصول:")}</span> {data.blocked_servers.join(", ")}
+              <span className="text-black/30">{t(" — servers this role is not entitled to (invisible to them).", " — خوادم لا يملك هذا الدور صلاحية الوصول إليها (غير مرئية له).")}</span>
             </div>
           )}
           <p className="text-xs text-black/40">{data.note}</p>
@@ -229,13 +230,15 @@ export function SeeAsModal({ sub, role, onClose }: { sub?: string; role?: string
 // ── 4. Global search ─────────────────────────────────────────────────────────
 // "Search for that thing." Looks across identities, sessions, tools, audit, keys and OAuth
 // clients — not just the current table — and jumps you to the right page.
-const KIND_META: Record<string, { label: string; color: string }> = {
-  identity: { label: "Identity", color: "#4b4fa6" },
-  session: { label: "Session", color: "#1F7A5C" },
-  tool: { label: "Tool", color: "#8a6100" },
-  api_key: { label: "API key", color: "#4b4fa6" },
-  oauth_client: { label: "OAuth", color: "#4b4fa6" },
-  audit: { label: "Audit", color: "#787878" },
+// `label` holds the Arabic; `en` the English. Rendered via t(en, label) so it
+// follows the runtime language switch (module-level maps can't call t() directly).
+const KIND_META: Record<string, { en: string; label: string; color: string }> = {
+  identity: { en: "Identity", label: "الهوية", color: "#4b4fa6" },
+  session: { en: "Session", label: "الجلسة", color: "#1F7A5C" },
+  tool: { en: "Tool", label: "الأداة", color: "#8a6100" },
+  api_key: { en: "API key", label: "مفتاح API", color: "#4b4fa6" },
+  oauth_client: { en: "OAuth", label: "OAuth", color: "#4b4fa6" },
+  audit: { en: "Audit", label: "سجل التدقيق", color: "#787878" },
 };
 
 export function GlobalSearchBox({ query, setQuery, onNavigate }: {
@@ -273,22 +276,22 @@ export function GlobalSearchBox({ query, setQuery, onNavigate }: {
       <div className="flex items-center gap-2 bg-black/[0.04] rounded-2xl px-3 py-1 w-52">
         <Search size={14} className="text-black/30 shrink-0" />
         <input value={query} onChange={(e) => { setQuery(e.target.value); setOpen(true); }} onFocus={() => setOpen(true)}
-          placeholder="Search everything…"
+          placeholder={t("Search everything…", "ابحث عن أي شيء…")}
           className="text-sm text-black bg-transparent outline-none border-none w-full placeholder:text-black/20" />
         {query && <button onClick={() => { setQuery(""); setResults([]); }} className="text-black/30 hover:text-black"><X size={12} /></button>}
       </div>
       {open && query.trim().length >= 2 && (
         <div className="absolute right-0 top-[38px] w-[380px] max-h-[60vh] overflow-y-auto bg-white rounded-xl shadow-xl border border-black/10 z-50 py-2"
           style={{ fontFamily: "Inter, sans-serif" }}>
-          {loading && results.length === 0 ? <div className="px-4 py-3 text-xs text-black/40">Searching…</div>
-            : results.length === 0 ? <div className="px-4 py-3 text-xs text-black/40">No matches across the system.</div>
+          {loading && results.length === 0 ? <div className="px-4 py-3 text-xs text-black/40">{t("Searching…", "جارٍ البحث…")}</div>
+            : results.length === 0 ? <div className="px-4 py-3 text-xs text-black/40">{t("No matches across the system.", "لا توجد نتائج مطابقة في النظام.")}</div>
               : results.map((r, i) => {
-                const meta = KIND_META[r.kind] || { label: r.kind, color: "#787878" };
+                const meta = KIND_META[r.kind] || { en: r.kind, label: r.kind, color: "#787878" };
                 return (
                   <button key={i} onClick={() => go(r)}
-                    className="w-full text-left px-4 py-2 hover:bg-black/[0.03] flex items-center gap-3">
+                    className="w-full text-left px-4 py-2 hover:bg-black/[0.08] flex items-center gap-3">
                     <span className="text-[10px] px-1.5 py-0.5 rounded shrink-0 w-[54px] text-center"
-                      style={{ background: meta.color + "22", color: meta.color }}>{meta.label}</span>
+                      style={{ background: meta.color + "22", color: meta.color }}>{t(meta.en, meta.label)}</span>
                     <span className="flex flex-col min-w-0 flex-1">
                       <span className="text-sm text-black truncate">{r.label}</span>
                       <span className="text-xs text-black/40 truncate">{r.detail}</span>

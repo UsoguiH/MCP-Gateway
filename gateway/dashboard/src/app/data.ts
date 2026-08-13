@@ -9,6 +9,7 @@
 // missing one.
 import { useCallback, useEffect, useState } from "react";
 import { apiGet, ApiError } from "@/api";
+import { t } from "./i18n";
 
 export type Range = "Today" | "Last 7 days" | "Last 30 days";
 export const RANGES: Range[] = ["Today", "Last 7 days", "Last 30 days"];
@@ -95,11 +96,11 @@ function hhmmss(ts?: number): string {
 function relTime(ts?: number | null): string {
   if (!ts) return "—";
   const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
-  if (s < 5) return "Just now";
-  if (s < 60) return `${s} seconds ago`;
-  if (s < 3600) return `${Math.floor(s / 60)} minutes ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)} hours ago`;
-  return `${Math.floor(s / 86400)} days ago`;
+  if (s < 5) return t("Just now", "الآن");
+  if (s < 60) return t(`${s} seconds ago`, `منذ ${s} ثانية`);
+  if (s < 3600) return t(`${Math.floor(s / 60)} minutes ago`, `منذ ${Math.floor(s / 60)} دقيقة`);
+  if (s < 86400) return t(`${Math.floor(s / 3600)} hours ago`, `منذ ${Math.floor(s / 3600)} ساعة`);
+  return t(`${Math.floor(s / 86400)} days ago`, `منذ ${Math.floor(s / 86400)} يوم`);
 }
 
 function duration(sec?: number | null): string {
@@ -126,8 +127,8 @@ function codeFor(action: string): number {
 function bucketLabel(ts: number, hours: number): string {
   const d = new Date(ts * 1000);
   if (hours <= 24) return d.toTimeString().slice(0, 5);                       // 14:00
-  if (hours <= 168) return d.toLocaleDateString(undefined, { weekday: "short" });  // Tue
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });  // Jul 5
+  if (hours <= 168) return d.toLocaleDateString(t("en", "ar"), { weekday: "short" });  // الثلاثاء
+  return d.toLocaleDateString(t("en", "ar"), { month: "short", day: "numeric" });  // ٥ يوليو
 }
 
 async function loadDashboard(range: Range): Promise<Dashboard> {
@@ -352,9 +353,9 @@ async function loadDashboard(range: Range): Promise<Dashboard> {
     loaded: true,
     isAdmin,
     stats: {
-      totalRequests: totalReq.toLocaleString(),
+      totalRequests: totalReq.toLocaleString(t("en", "ar")),
       activeServers: String(healthServers.length),
-      toolCalls: toolCalls.toLocaleString(),
+      toolCalls: toolCalls.toLocaleString(t("en", "ar")),
       errorRate: `${errorRate.toFixed(2)}%`,
     },
     deltas: {

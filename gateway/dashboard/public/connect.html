@@ -5,117 +5,235 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Connect your AI — Secure MCP Gateway</title>
 <style>
-  :root{
-    --bg:#0f1720; --card:#1a2330; --line:#2a3644; --ink:#e8ecf0; --muted:#9fb0c0;
-    --accent:#2f81f7; --ok:#2ea043; --code:#0c141d; color-scheme:dark;
-  }
+  /* SnowUI tokens — same design language as the gateway console (/):
+     Inter, white page, #f9f9fa cards @20px, #1C1C1C primary, black/10 borders,
+     black/[0.08] hovers, tints: #edeefc info, #fdf3e0 warn, #fbe6e6 danger. */
+  :root{ color-scheme: light; }
   *{box-sizing:border-box}
-  body{margin:0;font-family:"Segoe UI",system-ui,sans-serif;background:var(--bg);color:var(--ink);line-height:1.55}
-  .wrap{max-width:760px;margin:0 auto;padding:40px 22px 80px}
-  h1{font-size:26px;margin:0 0 4px}
-  .lede{color:var(--muted);font-size:15px;margin:0 0 28px}
-  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px;margin:16px 0}
-  h2{font-size:17px;margin:0 0 6px;display:flex;align-items:center;gap:9px}
-  .step{font-size:12px;font-weight:700;background:var(--accent);color:#fff;border-radius:50%;
-        width:24px;height:24px;display:inline-grid;place-items:center;flex:none}
-  .muted{color:var(--muted);font-size:13.5px;margin:2px 0 0}
-  label{display:block;font-size:12.5px;color:var(--muted);font-weight:600;margin:14px 0 0}
-  input{width:100%;margin-top:6px;padding:11px 13px;font-size:15px;border-radius:9px;
-        border:1px solid #33414f;background:#0f1720;color:var(--ink)}
-  input:focus{outline:2px solid var(--accent);border-color:var(--accent)}
-  button{margin-top:18px;padding:11px 18px;font-size:14.5px;font-weight:600;border:0;border-radius:9px;
-         background:var(--accent);color:#fff;cursor:pointer}
-  button.ghost{background:transparent;border:1px solid #33414f;color:var(--ink)}
-  button:hover{filter:brightness(1.08)}
-  button:disabled{opacity:.5;cursor:not-allowed}
-  pre{background:var(--code);border:1px solid var(--line);border-radius:10px;padding:14px 16px;
-      overflow-x:auto;font-family:Consolas,"Cascadia Mono",monospace;font-size:12.5px;margin:12px 0 0}
-  code{font-family:Consolas,"Cascadia Mono",monospace}
-  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-  .pill{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;border-radius:999px;
-        padding:5px 12px;border:1px solid var(--line);color:var(--muted)}
-  .dot{width:9px;height:9px;border-radius:50%;background:#5b6b7b}
-  .dot.on{background:var(--ok);box-shadow:0 0 0 3px rgba(46,160,67,.2)}
-  .err{background:#3a1720;border:1px solid #6b2434;color:#ffb3bf;padding:10px 12px;border-radius:9px;
-       font-size:13px;margin-top:12px}
-  .warn{color:#e3b341;font-size:12.5px;margin-top:10px}
+  body{margin:0;font-family:Inter,"Segoe UI",system-ui,sans-serif;background:#fff;color:#000;line-height:1.55}
+  .wrap{max-width:1080px;margin:0 auto;padding:36px 24px 90px}
+
+  /* header */
+  .hero{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:14px;margin-bottom:20px}
+  h1{font-size:22px;font-weight:600;margin:0}
+  .lede{color:rgba(0,0,0,.4);font-size:13.5px;margin:4px 0 0}
+  .brand{display:flex;align-items:center}
+  .shield{display:inline-grid;place-items:center;width:38px;height:38px;border-radius:12px;background:#edeefc;margin-right:12px;flex:none}
+  .pill{display:inline-flex;align-items:center;gap:7px;font-size:12px;border-radius:999px;
+        padding:6px 13px;border:1px solid rgba(0,0,0,.1);color:rgba(0,0,0,.6);background:#fff}
+  .dot{width:8px;height:8px;border-radius:50%;background:rgba(0,0,0,.2);flex:none}
+  .dot.on{background:#22c55e;box-shadow:0 0 0 3px rgba(34,197,94,.15)}
+
+  /* privacy strip */
+  .privacy{display:flex;gap:6px 20px;flex-wrap:wrap;font-size:12px;color:rgba(0,0,0,.55);
+           background:#f9f9fa;border-radius:16px;padding:12px 18px;margin-bottom:22px}
+  .privacy span{display:inline-flex;align-items:center;gap:7px}
+  .tick{color:#16a34a;font-weight:700}
+
+  /* cards */
+  .card{background:#f9f9fa;border-radius:20px;padding:24px}
+  h2{font-size:14px;font-weight:600;margin:0 0 6px;display:flex;align-items:center;gap:9px;color:#000}
+  .stepn{font-size:11px;font-weight:600;background:rgba(0,0,0,.07);color:#000;border-radius:50%;
+         width:22px;height:22px;display:inline-grid;place-items:center;flex:none}
+  .muted{color:rgba(0,0,0,.5);font-size:13px;margin:2px 0 0}
+  label{display:block;font-size:12px;color:rgba(0,0,0,.5);margin:14px 0 0}
+  input{width:100%;margin-top:6px;padding:9px 12px;font-size:14px;border-radius:10px;
+        border:1px solid rgba(0,0,0,.1);background:#fff;color:#000;outline:none}
+  input:focus{border-color:rgba(0,0,0,.3)}
+  button{padding:9px 16px;font-size:13px;font-weight:500;border:0;border-radius:10px;
+         background:#1C1C1C;color:#fff;cursor:pointer;transition:opacity .15s,background-color .15s}
+  button:hover{opacity:.8}
+  button.ghost{background:transparent;border:1px solid rgba(0,0,0,.1);color:#000}
+  button.ghost:hover{opacity:1;background:rgba(0,0,0,.08)}
+  button:disabled{opacity:.4;cursor:not-allowed}
+  pre{background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:12px;padding:12px 14px;
+      overflow-x:auto;font-family:Consolas,"Cascadia Mono",monospace;font-size:12px;color:#000;
+      margin:10px 0 0;white-space:pre-wrap;word-break:break-all}
+  .err{background:#fbe6e6;color:#D9534F;padding:10px 12px;border-radius:12px;font-size:12.5px;margin-top:12px}
+  .warn{background:#fdf3e0;color:#8a6100;font-size:12px;border-radius:12px;padding:10px 12px;margin-top:12px;line-height:1.5}
   .hide{display:none}
-  .tabs{display:flex;gap:8px;margin-bottom:4px}
-  .tab{padding:8px 14px;border-radius:9px 9px 0 0;border:1px solid var(--line);border-bottom:0;
-       background:transparent;color:var(--muted);cursor:pointer;font-size:13.5px}
-  .tab.active{background:var(--card);color:var(--ink)}
-  a{color:var(--accent)}
+  a{color:#000}
+
+  /* client picker */
+  .picker{display:flex;gap:4px;flex-wrap:wrap;background:#f9f9fa;border-radius:999px;
+          padding:5px;width:max-content;max-width:100%;margin:24px 0 16px}
+  .client{display:inline-flex;align-items:center;gap:8px;padding:8px 16px;border-radius:999px;font-size:13px;
+          color:rgba(0,0,0,.4);background:transparent;border:0;cursor:pointer;font-weight:500}
+  .client:hover{opacity:1;color:rgba(0,0,0,.7);background:rgba(0,0,0,.08)}
+  .client.active{background:#1C1C1C;color:#fff}
+  .client svg{flex:none}
+
+  /* 3-step columns */
+  .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  @media(max-width:860px){.steps{grid-template-columns:1fr}}
+  .copyrow{display:flex;gap:8px;margin-top:10px}
+  .copyrow input{margin:0;font-family:Consolas,"Cascadia Mono",monospace;font-size:12.5px;color:rgba(0,0,0,.6)}
+  .copyrow button{flex:none}
+  .kbd{display:inline-block;background:#fff;border:1px solid rgba(0,0,0,.1);border-radius:6px;
+       padding:1px 7px;font-size:11.5px;font-family:Consolas,monospace}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>Connect your AI</h1>
-  <p class="lede">Point your local AI assistant at the secure gateway. It will reach internal
-    databases, code and documents <b>as you</b> — every action authorized, masked and audited.</p>
+
+  <div class="hero">
+    <div class="brand">
+      <span class="shield">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#4c4ddc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      </span>
+      <div>
+        <h1>Connect your AI</h1>
+        <p class="lede">Your assistant reaches internal data as you — authorized, masked and audited on every call.</p>
+      </div>
+    </div>
+    <div class="row">
+      <span class="pill hide" id="who-pill"><b id="who"></b></span>
+      <span class="pill"><span class="dot" id="live-dot"></span><span id="live-text">not signed in</span></span>
+    </div>
+  </div>
+
+  <div class="privacy">
+    <span><span class="tick">✓</span> Self-hosted — nothing leaves this network</span>
+    <span><span class="tick">✓</span> No third-party services or trackers</span>
+    <span><span class="tick">✓</span> Tokens are yours: shown once, expiring, revocable</span>
+    <span><span class="tick">✓</span> Every tool call is policy-checked &amp; audit-chained</span>
+  </div>
 
   <!-- Sign in -->
-  <div class="card" id="login-card">
-    <h2><span class="step">1</span> Sign in</h2>
-    <p class="muted">Same account you use for the gateway console.</p>
+  <div class="card" id="login-card" style="max-width:460px">
+    <h2><span class="stepn">1</span> Sign in first</h2>
+    <p class="muted">Connection details are only shown to signed-in operators. Same account as the gateway console.</p>
     <label>Username<input id="u" autocomplete="username" autofocus></label>
     <label>Password<input id="p" type="password" autocomplete="current-password"></label>
     <label id="otp-label" class="hide">Authenticator code (MFA)<input id="otp" inputmode="numeric" pattern="[0-9]*" placeholder="123456"></label>
     <div id="login-err" class="err hide"></div>
-    <button id="login-btn">Sign in</button>
+    <div style="margin-top:18px"><button id="login-btn">Sign in</button></div>
   </div>
 
-  <!-- Connected status + instructions -->
+  <!-- Connected app -->
   <div id="app" class="hide">
-    <div class="card">
-      <div class="row" style="justify-content:space-between">
-        <div><b id="who"></b><div class="muted">signed in</div></div>
-        <span class="pill"><span class="dot" id="live-dot"></span><span id="live-text">checking…</span></span>
-      </div>
+
+    <div class="picker" role="tablist" id="picker">
+      <button class="client active" data-c="claude-code">
+        <!-- Official Claude Code mark (Simple Icons, brand coral #D97757) -->
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="#D97757" role="img" aria-label="Claude Code"><path d="M21 10.5h3v3h-3v3h-1.5v3H18v-3h-1.5v3H15v-3H9v3H7.5v-3H6v3H4.5v-3H3v-3H0v-3h3v-6h18Zm-15 0h1.5v-3H6Zm10.5 0H18v-3h-1.5z"/></svg>
+        Claude Code
+      </button>
+      <button class="client" data-c="claude">
+        <!-- Official Claude spark (Simple Icons, brand coral #D97757) -->
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="#D97757" role="img" aria-label="Claude"><path d="m4.7144 15.9555 4.7174-2.6471.079-.2307-.079-.1275h-.2307l-.7893-.0486-2.6956-.0729-2.3375-.0971-2.2646-.1214-.5707-.1215-.5343-.7042.0546-.3522.4797-.3218.686.0608 1.5179.1032 2.2767.1578 1.6514.0972 2.4468.255h.3886l.0546-.1579-.1336-.0971-.1032-.0972L6.973 9.8356l-2.55-1.6879-1.3356-.9714-.7225-.4918-.3643-.4614-.1578-1.0078.6557-.7225.8803.0607.2246.0607.8925.686 1.9064 1.4754 2.4893 1.8336.3643.3035.1457-.1032.0182-.0728-.164-.2733-1.3539-2.4467-1.445-2.4893-.6435-1.032-.17-.6194c-.0607-.255-.1032-.4674-.1032-.7285L6.287.1335 6.6997 0l.9957.1336.419.3642.6192 1.4147 1.0018 2.2282 1.5543 3.0296.4553.8985.2429.8318.091.255h.1579v-.1457l.1275-1.706.2368-2.0947.2307-2.6957.0789-.7589.3764-.9107.7468-.4918.5828.2793.4797.686-.0668.4433-.2853 1.8517-.5586 2.9021-.3643 1.9429h.2125l.2429-.2429.9835-1.3053 1.6514-2.0643.7286-.8196.85-.9046.5464-.4311h1.0321l.759 1.1293-.34 1.1657-1.0625 1.3478-.8804 1.1414-1.2628 1.7-.7893 1.36.0729.1093.1882-.0183 2.8535-.607 1.5421-.2794 1.8396-.3157.8318.3886.091.3946-.3278.8075-1.967.4857-2.3072.4614-3.4364.8136-.0425.0304.0486.0607 1.5482.1457.6618.0364h1.621l3.0175.2247.7892.522.4736.6376-.079.4857-1.2142.6193-1.6393-.3886-3.825-.9107-1.3113-.3279h-.1822v.1093l1.0929 1.0686 2.0035 1.8092 2.5075 2.3314.1275.5768-.3218.4554-.34-.0486-2.2039-1.6575-.85-.7468-1.9246-1.621h-.1275v.17l.4432.6496 2.3436 3.5214.1214 1.0807-.17.3521-.6071.2125-.6679-.1214-1.3721-1.9246L14.38 17.959l-1.1414-1.9428-.1397.079-.674 7.2552-.3156.3703-.7286.2793-.6071-.4614-.3218-.7468.3218-1.4753.3886-1.9246.3157-1.53.2853-1.9004.17-.6314-.0121-.0425-.1397.0182-1.4328 1.9672-2.1796 2.9446-1.7243 1.8456-.4128.164-.7164-.3704.0667-.6618.4008-.5889 2.386-3.0357 1.4389-1.882.929-1.0868-.0062-.1579h-.0546l-6.3385 4.1164-1.1293.1457-.4857-.4554.0608-.7467.2307-.2429 1.9064-1.3114Z"/></svg>
+        Claude (app &amp; desktop)
+      </button>
+      <button class="client" data-c="cursor">
+        <!-- Official Cursor mark (Simple Icons; currentColor so it flips white on the active pill) -->
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" role="img" aria-label="Cursor"><path d="M11.503.131 1.891 5.678a.84.84 0 0 0-.42.726v11.188c0 .3.162.575.42.724l9.609 5.55a1 1 0 0 0 .998 0l9.61-5.55a.84.84 0 0 0 .42-.724V6.404a.84.84 0 0 0-.42-.726L12.497.131a1.01 1.01 0 0 0-.996 0M2.657 6.338h18.55c.263 0 .43.287.297.515L12.23 22.918c-.062.107-.229.064-.229-.06V12.335a.59.59 0 0 0-.295-.51l-9.11-5.257c-.109-.063-.064-.23.061-.23"/></svg>
+        Cursor
+      </button>
+      <button class="client" data-c="manual">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M21 2l-2 2m-7.6 7.6a5.5 5.5 0 1 0-7.8 7.8 5.5 5.5 0 0 0 7.8-7.8zm0 0L19 5m-4 4l3 3"/></svg>
+        Other client / token
+      </button>
     </div>
 
-    <div class="card">
-      <h2><span class="step">2</span> Choose how your AI connects</h2>
-      <div class="tabs" role="tablist">
-        <button class="tab active" id="tab-oauth" onclick="showTab('oauth')">Automatic (recommended)</button>
-        <button class="tab" id="tab-manual" onclick="showTab('manual')">Manual token</button>
-      </div>
-
-      <!-- OAuth path -->
-      <div id="pane-oauth" class="card" style="margin:0;border-radius:0 10px 10px 10px">
-        <p class="muted">For clients that support MCP sign-in (e.g. Claude Code). Add the gateway once;
-          a browser window opens for you to sign in, and the token is handled and refreshed for you —
-          nothing to copy.</p>
-        <p class="muted" style="margin-top:12px"><b>Claude Code</b></p>
-        <pre id="oauth-cli">claude mcp add --transport http company-gateway <span id="mcpurl1"></span></pre>
-        <p class="muted" style="margin-top:12px"><b>Other MCP clients</b> — add an HTTP MCP server with this URL and choose “sign in / OAuth” when prompted:</p>
-        <pre id="oauth-url"></pre>
-      </div>
-
-      <!-- Manual path -->
-      <div id="pane-manual" class="card hide" style="margin:0;border-radius:0 10px 10px 10px">
-        <p class="muted">For clients that only accept a fixed token in their config file. Generate one below
-          and paste the snippet into your client. The token is tied to your account and expires — regenerate
-          when it does.</p>
-        <label>Label (which client is this for?)<input id="label" placeholder="LM Studio on my laptop"></label>
-        <button id="gen-btn">Generate connection token</button>
-        <div id="gen-err" class="err hide"></div>
-        <div id="gen-out" class="hide">
-          <p class="muted" style="margin-top:16px">Paste this into your MCP client config:</p>
-          <pre id="config-json"></pre>
-          <div class="row">
-            <button class="ghost" id="copy-btn">Copy config</button>
-            <span class="muted" id="expiry"></span>
-          </div>
-          <p class="warn">⚠ Treat this token like a password — anyone with it can act as you until it expires. It is shown once.</p>
+    <!-- ── Claude Code ── -->
+    <div class="pane" id="pane-claude-code">
+      <div class="steps">
+        <div class="card">
+          <h2><span class="stepn">1</span> Copy the gateway URL</h2>
+          <p class="muted">You'll register it with Claude Code in the next step.</p>
+          <div class="copyrow"><input readonly class="mcpurl"><button class="ghost copy-url">Copy</button></div>
+        </div>
+        <div class="card">
+          <h2><span class="stepn">2</span> Add it in your terminal</h2>
+          <p class="muted">One command; works in any project (add <span class="kbd">--scope user</span> to keep it everywhere).</p>
+          <pre id="cc-cmd"></pre>
+          <div class="row" style="margin-top:10px"><button class="ghost" data-copy="cc-cmd">Copy command</button></div>
+        </div>
+        <div class="card">
+          <h2><span class="stepn">3</span> Sign in &amp; go</h2>
+          <p class="muted">In Claude Code run <span class="kbd">/mcp</span>, pick <b>company-gateway</b>, choose <b>Authenticate</b> — a browser window opens on this gateway to sign you in. Then ask Claude to use a tool.</p>
+          <p class="muted" style="margin-top:10px">This page turns green the moment your client connects:</p>
+          <p style="margin-top:8px"><span class="pill"><span class="dot livedot"></span><span class="livetext">waiting…</span></span></p>
         </div>
       </div>
     </div>
 
-    <div class="card">
-      <h2><span class="step">3</span> Confirm it works</h2>
-      <p class="muted">Once your AI connects, this indicator turns green. Then just ask your assistant to
-        use a tool — for example “list the shares I can read” — and watch it flow through the gateway.</p>
+    <!-- ── Claude app / desktop ── -->
+    <div class="pane hide" id="pane-claude">
+      <div class="steps">
+        <div class="card">
+          <h2><span class="stepn">1</span> Copy the gateway URL</h2>
+          <p class="muted">You'll paste it into Claude as a custom connector.</p>
+          <div class="copyrow"><input readonly class="mcpurl"><button class="ghost copy-url">Copy</button></div>
+          <p class="warn">This gateway lives on your private network — use Claude Desktop on a machine inside the network (claude.ai's cloud can't reach it, which is exactly the point).</p>
+        </div>
+        <div class="card">
+          <h2><span class="stepn">2</span> Add the connector</h2>
+          <p class="muted">In Claude Desktop: <b>Settings → Connectors → Add custom connector</b>. Name it (e.g. <i>Company Gateway</i>), paste the URL, save.</p>
+        </div>
+        <div class="card">
+          <h2><span class="stepn">3</span> Sign in &amp; go</h2>
+          <p class="muted">Click <b>Connect</b> on the new connector — Claude opens this gateway's sign-in page. After that, just ask Claude to use your tools.</p>
+          <p class="muted" style="margin-top:10px">Live check:</p>
+          <p style="margin-top:8px"><span class="pill"><span class="dot livedot"></span><span class="livetext">waiting…</span></span></p>
+        </div>
+      </div>
     </div>
+
+    <!-- ── Cursor ── -->
+    <div class="pane hide" id="pane-cursor">
+      <div class="steps">
+        <div class="card">
+          <h2><span class="stepn">1</span> Copy the config</h2>
+          <p class="muted">Cursor reads MCP servers from <span class="kbd">~/.cursor/mcp.json</span> (or per-project <span class="kbd">.cursor/mcp.json</span>).</p>
+          <pre id="cursor-json"></pre>
+          <div class="row" style="margin-top:10px"><button class="ghost" data-copy="cursor-json">Copy config</button></div>
+        </div>
+        <div class="card">
+          <h2><span class="stepn">2</span> Enable it</h2>
+          <p class="muted">Open <b>Cursor Settings → MCP</b> — the gateway appears in the server list. Toggle it on and choose <b>Sign in</b> when prompted (OAuth; no token to paste).</p>
+        </div>
+        <div class="card">
+          <h2><span class="stepn">3</span> Confirm</h2>
+          <p class="muted">Ask Cursor's agent to list its tools — you should see the gateway's tools, filtered to what your role may use.</p>
+          <p class="muted" style="margin-top:10px">Live check:</p>
+          <p style="margin-top:8px"><span class="pill"><span class="dot livedot"></span><span class="livetext">waiting…</span></span></p>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Manual token ── -->
+    <div class="pane hide" id="pane-manual">
+      <div class="steps">
+        <div class="card">
+          <h2><span class="stepn">1</span> Generate a token</h2>
+          <p class="muted">For clients without MCP sign-in (LM Studio, scripts, older tools). The token acts <b>as you</b>, expires on its own, and can be revoked from the console.</p>
+          <label>Label — which client is this for?<input id="label" placeholder="LM Studio on my laptop"></label>
+          <div style="margin-top:14px"><button id="gen-btn">Generate connection token</button></div>
+          <div id="gen-err" class="err hide"></div>
+        </div>
+        <div class="card">
+          <h2><span class="stepn">2</span> Paste the config</h2>
+          <p class="muted">Add this to your client's MCP config file. The token is shown <b>once</b> — treat it like a password.</p>
+          <div id="gen-out" class="hide">
+            <pre id="config-json"></pre>
+            <div class="row" style="margin-top:10px">
+              <button class="ghost" data-copy="config-json">Copy config</button>
+              <span class="muted" id="expiry"></span>
+            </div>
+          </div>
+          <p class="muted hide" id="gen-hint" style="margin-top:10px"><i>Generate a token first.</i></p>
+        </div>
+        <div class="card">
+          <h2><span class="stepn">3</span> Confirm</h2>
+          <p class="muted">Restart your client so it picks up the config, then ask it to list its tools.</p>
+          <p class="muted" style="margin-top:10px">Live check:</p>
+          <p style="margin-top:8px"><span class="pill"><span class="dot livedot"></span><span class="livetext">waiting…</span></span></p>
+        </div>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -139,10 +257,30 @@
     return j;
   }
 
-  // Detect whether MFA is required so we show the code field.
+  // Show the MFA field only if this install requires it.
   fetch("/api/auth/info").then(r=>r.json()).then(d=>{
     if (d && d.mfa_required) show($("otp-label"), true);
   }).catch(()=>{});
+
+  // ?preview — look around the signed-in layout without authenticating.
+  // Purely visual: no token exists, so the API (status, token minting) stays locked.
+  if (new URLSearchParams(location.search).has("preview")){
+    $("who").textContent = "Preview mode · not signed in";
+    show($("who-pill"), true);
+    $("live-text").textContent = "preview — sign in for live status";
+    show($("login-card"), false); show($("app"), true);
+    renderUrls();
+    show($("gen-hint"), true);
+    $("gen-btn").disabled = true;
+    $("gen-btn").textContent = "Sign in to generate a token";
+  }
+
+  function renderUrls(){
+    document.querySelectorAll(".mcpurl").forEach(i => { i.value = MCPURL; });
+    $("cc-cmd").textContent = "claude mcp add --transport http company-gateway " + MCPURL;
+    $("cursor-json").textContent = JSON.stringify(
+      {mcpServers: {"company-gateway": {url: MCPURL}}}, null, 2);
+  }
 
   $("login-btn").onclick = async function(){
     show($("login-err"), false);
@@ -157,30 +295,46 @@
                  body:JSON.stringify({mfa_ticket: step1.mfa_ticket, otp})});
       }
       TOKEN = auth.token; THUMB = auth.thumbprint;
-      $("who").textContent = auth.user.name + " (" + auth.user.role + ")";
+      $("who").textContent = auth.user.name + " · " + auth.user.role;
+      show($("who-pill"), true);
       show($("login-card"), false); show($("app"), true);
+      renderUrls();
+      show($("gen-hint"), true);
       pollStatus(); setInterval(pollStatus, 4000);
     } catch(e){ fail(e.message); }
   };
   function fail(msg){ $("login-err").textContent = msg; show($("login-err"), true); }
 
-  window.showTab = function(which){
-    const oauth = which === "oauth";
-    $("tab-oauth").classList.toggle("active", oauth);
-    $("tab-manual").classList.toggle("active", !oauth);
-    show($("pane-oauth"), oauth); show($("pane-manual"), !oauth);
-  };
+  // client picker
+  document.querySelectorAll("#picker .client").forEach(btn => {
+    btn.onclick = function(){
+      document.querySelectorAll("#picker .client").forEach(b => b.classList.toggle("active", b === btn));
+      document.querySelectorAll(".pane").forEach(p => show(p, p.id === "pane-" + btn.dataset.c));
+    };
+  });
+
+  // copy helpers
+  function flash(btn){
+    const old = btn.textContent; btn.textContent = "Copied ✓";
+    setTimeout(()=>{ btn.textContent = old; }, 1400);
+  }
+  document.querySelectorAll(".copy-url").forEach(btn => {
+    btn.onclick = () => navigator.clipboard.writeText(MCPURL).then(()=>flash(btn));
+  });
+  document.querySelectorAll("[data-copy]").forEach(btn => {
+    btn.onclick = () => navigator.clipboard.writeText($(btn.dataset.copy).textContent).then(()=>flash(btn));
+  });
 
   async function pollStatus(){
     try {
       const s = await api("/api/connect/status");
       MCPURL = location.origin + (s.mcp_url_path || "/mcp");
-      $("mcpurl1").textContent = MCPURL;
-      $("oauth-url").textContent = MCPURL;
-      $("live-dot").classList.toggle("on", s.connected);
-      $("live-text").textContent = s.connected
-        ? (s.sessions + " AI client" + (s.sessions>1?"s":"") + " connected")
-        : "No AI connected yet";
+      const on = s.connected;
+      const txt = on ? (s.sessions + " AI client" + (s.sessions>1?"s":"") + " connected")
+                     : "no AI connected yet";
+      $("live-dot").classList.toggle("on", on); $("live-text").textContent = txt;
+      document.querySelectorAll(".livedot").forEach(d => d.classList.toggle("on", on));
+      document.querySelectorAll(".livetext").forEach(t => { t.textContent = on ? txt : "waiting for your client…"; });
     } catch(e){ /* token expired: silent */ }
   }
 
@@ -192,15 +346,8 @@
       $("config-json").textContent = JSON.stringify(d.config, null, 2);
       const hrs = Math.round(d.expires_in/3600);
       $("expiry").textContent = "Expires in ~" + hrs + " hour" + (hrs>1?"s":"") + ".";
-      show($("gen-out"), true);
+      show($("gen-out"), true); show($("gen-hint"), false);
     } catch(e){ $("gen-err").textContent = e.message; show($("gen-err"), true); }
-  };
-
-  $("copy-btn").onclick = function(){
-    navigator.clipboard.writeText($("config-json").textContent).then(()=>{
-      $("copy-btn").textContent = "Copied ✓";
-      setTimeout(()=>{ $("copy-btn").textContent = "Copy config"; }, 1500);
-    });
   };
 })();
 </script>

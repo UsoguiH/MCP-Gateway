@@ -13,6 +13,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, refreshSession, sessionState } from "@/api";
 import { Modal, PrimaryBtn, GhostBtn } from "./ui";
+import { t } from "./i18n";
 
 const POLL_MS = 15_000;          // how often we re-check the clock
 const IDLE_MS = 60_000;          // no interaction for this long ⇒ treat the operator as idle
@@ -47,8 +48,8 @@ export function useSessionGuard(onExpired: (reason: string) => void) {
     } catch (e) {
       // Past the absolute cap (or already dead): the only honest move is to say so.
       onExpired(e instanceof ApiError && e.status === 401
-        ? (e.message || "Your session reached its maximum length. Please sign in again.")
-        : "Your session could not be extended. Please sign in again.");
+        ? (e.message || t("Your session reached its maximum length. Please sign in again.", "بلغت جلستك الحد الأقصى لمدتها. يرجى تسجيل الدخول مرة أخرى."))
+        : t("Your session could not be extended. Please sign in again.", "تعذّر تمديد جلستك. يرجى تسجيل الدخول مرة أخرى."));
       return false;
     } finally { setBusy(false); }
   }, [onExpired]);
@@ -72,7 +73,7 @@ export function useSessionGuard(onExpired: (reason: string) => void) {
       const capReached = cap.current.age + left >= cap.current.max;
 
       if (left <= 0) {
-        onExpired("Your session expired. Please sign in again.");
+        onExpired(t("Your session expired. Please sign in again.", "انتهت صلاحية جلستك. يرجى تسجيل الدخول مرة أخرى."));
         return;
       }
       if (!idle && !capReached && left < warnSecs.current * 2) {
@@ -93,34 +94,32 @@ export function useSessionGuard(onExpired: (reason: string) => void) {
   // Tighten the countdown once the warning is up.
   useEffect(() => {
     if (warnAt == null) return;
-    const t = setInterval(() => {
+    const timer = setInterval(() => {
       if (expiresAt.current == null) return;
       const left = (expiresAt.current - Date.now()) / 1000;
-      if (left <= 0) onExpired("Your session expired. Please sign in again.");
+      if (left <= 0) onExpired(t("Your session expired. Please sign in again.", "انتهت صلاحية جلستك. يرجى تسجيل الدخول مرة أخرى."));
       else setWarnAt(left);
     }, 1000);
-    return () => clearInterval(t);
+    return () => clearInterval(timer);
   }, [warnAt, onExpired]);
 
   const capReached = warnAt != null &&
     cap.current.age + warnAt >= cap.current.max;
 
   const modal = warnAt == null ? null : (
-    <Modal title="Your session is about to expire" onClose={() => { /* must decide */ }} width={400}>
+    <Modal title={t("Your session is about to expire", "جلستك على وشك الانتهاء")} onClose={() => { /* must decide */ }} width={400}>
       <div className="flex flex-col gap-3">
         <div className="text-3xl font-semibold text-black tabular-nums">{mmss(warnAt)}</div>
         <p className="text-xs text-black/60 leading-5">
           {capReached
-            ? <>This session has reached its maximum length, so it cannot be extended. Sign in
-                again to continue — any approval you were reviewing is still in the queue.</>
-            : <>You have been idle, so the console is about to sign you out. Anything you were
-                reviewing is safe; extending keeps you where you are.</>}
+            ? t("This session has reached its maximum length, so it cannot be extended. Sign in again to continue — any approval you were reviewing is still in the queue.", "بلغت هذه الجلسة الحد الأقصى لمدتها، ولذلك لا يمكن تمديدها. سجّل الدخول مرة أخرى للمتابعة — أي موافقة كنت تراجعها لا تزال في قائمة الانتظار.")
+            : t("You have been idle, so the console is about to sign you out. Anything you were reviewing is safe; extending keeps you where you are.", "كنت خاملاً، ولذلك توشك وحدة التحكم على تسجيل خروجك. أي شيء كنت تراجعه محفوظ؛ التمديد يبقيك في مكانك.")}
         </p>
         <div className="flex gap-2 justify-end">
-          <GhostBtn onClick={() => onExpired("Signed out.")}>Sign out now</GhostBtn>
+          <GhostBtn onClick={() => onExpired(t("Signed out.", "تم تسجيل الخروج."))}>{t("Sign out now", "تسجيل الخروج الآن")}</GhostBtn>
           {!capReached && (
             <PrimaryBtn onClick={extend} disabled={busy}>
-              {busy ? "Extending…" : "Stay signed in"}
+              {busy ? t("Extending…", "جارٍ التمديد…") : t("Stay signed in", "البقاء مسجّلاً")}
             </PrimaryBtn>
           )}
         </div>

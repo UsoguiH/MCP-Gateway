@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CircleAlert, TriangleAlert, Info, CheckCheck, Trash2 } from "lucide-react";
 import { apiGet, apiPost, ApiError } from "@/api";
+import { t } from "./i18n";
 
 export type Notif = {
   id: string; ts: number; severity: "critical" | "warning" | "info";
@@ -44,11 +45,11 @@ export function useNotifications(onAuthExpired: () => void, intervalMs = 12000) 
 export function relTime(ts?: number): string {
   if (!ts) return "";
   const s = Math.max(0, Math.floor(Date.now() / 1000 - ts));
-  if (s < 5) return "just now";
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
+  if (s < 5) return t("just now", "الآن");
+  if (s < 60) return t(`${s}s ago`, `${s} ثانية مضت`);
+  if (s < 3600) return t(`${Math.floor(s / 60)}m ago`, `${Math.floor(s / 60)} د مضت`);
+  if (s < 86400) return t(`${Math.floor(s / 3600)}h ago`, `${Math.floor(s / 3600)} س مضت`);
+  return t(`${Math.floor(s / 86400)}d ago`, `${Math.floor(s / 86400)} يوم مضت`);
 }
 
 export function SevIcon({ severity, size = 14 }: { severity: Notif["severity"]; size?: number }) {
@@ -70,7 +71,7 @@ export function BellBadge({ unread }: { unread: number }) {
 
 function NotifRow({ n, compact }: { n: Notif; compact?: boolean }) {
   return (
-    <div className={`flex items-start gap-2.5 p-2 rounded-xl ${n.read ? "opacity-55" : ""} hover:bg-black/[0.03]`}>
+    <div className={`flex items-start gap-2.5 p-2 rounded-xl ${n.read ? "opacity-55" : ""} hover:bg-black/[0.08]`}>
       <div className="w-6 h-6 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
         style={{ background: SEV_BG[n.severity] ?? SEV_BG.info }}>
         <SevIcon severity={n.severity} size={13} />
@@ -99,25 +100,25 @@ export function NotificationFeed({ items, unread, onMarkAllRead, onClearRead }: 
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between px-1 py-2">
         <p className="text-sm text-black font-normal">
-          Notifications{unread > 0 && <span className="ml-2 text-xs px-1.5 py-0.5 rounded-full text-white" style={{ background: "#D9534F", fontWeight: 600 }}>{unread}</span>}
+          {t("Notifications", "الإشعارات")}{unread > 0 && <span className="ml-2 text-xs px-1.5 py-0.5 rounded-full text-white" style={{ background: "#D9534F", fontWeight: 600 }}>{unread}</span>}
         </p>
         <div className="flex items-center gap-1">
           {unread > 0 && (
-            <button onClick={onMarkAllRead} title="Mark all read" className="p-1 rounded-lg hover:bg-black/[0.04]">
+            <button onClick={onMarkAllRead} title={t("Mark all read", "تعليم الكل كمقروء")} className="p-1 rounded-lg hover:bg-black/[0.08]">
               <CheckCheck size={14} className="text-black/40" />
             </button>
           )}
           {earlier.length > 0 && (
-            <button onClick={onClearRead} title="Clear read notifications" className="p-1 rounded-lg hover:bg-black/[0.04]">
+            <button onClick={onClearRead} title={t("Clear read notifications", "مسح الإشعارات المقروءة")} className="p-1 rounded-lg hover:bg-black/[0.08]">
               <Trash2 size={14} className="text-black/40" />
             </button>
           )}
         </div>
       </div>
-      {items.length === 0 && <span className="text-xs text-black/30 px-2 py-1">All quiet — nothing needs you.</span>}
+      {items.length === 0 && <span className="text-xs text-black/30 px-2 py-1">{t("All quiet — nothing needs you.", "لا جديد — لا شيء يستدعي انتباهك.")}</span>}
       {fresh.map((n) => <NotifRow key={n.id} n={n} />)}
       {fresh.length > 0 && earlier.length > 0 && (
-        <p className="text-xs text-black/30 px-2 pt-2 pb-1">Earlier</p>
+        <p className="text-xs text-black/30 px-2 pt-2 pb-1">{t("Earlier", "أقدم")}</p>
       )}
       {earlier.slice(0, 20).map((n) => <NotifRow key={n.id} n={n} />)}
     </div>
@@ -132,17 +133,17 @@ export function NotificationDropdown({ items, unread, onMarkAllRead, onViewAll }
   return (
     <div className="absolute right-0 top-8 w-[300px] bg-white border border-black/10 rounded-2xl shadow-lg p-2 z-50 flex flex-col gap-1">
       <div className="flex items-center justify-between px-2 py-2">
-        <p className="text-sm text-black font-normal">Notifications</p>
+        <p className="text-sm text-black font-normal">{t("Notifications", "الإشعارات")}</p>
         {unread > 0 && (
           <button onClick={onMarkAllRead} className="text-xs text-black/40 hover:text-black flex items-center gap-1">
-            <CheckCheck size={12} /> Mark all read
+            <CheckCheck size={12} /> {t("Mark all read", "تعليم الكل كمقروء")}
           </button>
         )}
       </div>
-      {shown.length === 0 && <span className="text-xs text-black/30 px-2 py-2">All quiet — nothing needs you.</span>}
+      {shown.length === 0 && <span className="text-xs text-black/30 px-2 py-2">{t("All quiet — nothing needs you.", "لا جديد — لا شيء يستدعي انتباهك.")}</span>}
       {shown.map((n) => <NotifRow key={n.id} n={n} compact />)}
       <button onClick={onViewAll} className="text-xs text-black/40 hover:text-black px-2 py-2 text-left">
-        View all in panel →
+        {t("View all in panel →", "عرض الكل في اللوحة →")}
       </button>
     </div>
   );

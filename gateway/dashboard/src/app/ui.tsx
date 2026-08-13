@@ -2,6 +2,7 @@
 // Matches the SnowUI tokens used across the app (rounded-[20px], #f9f9fa, Inter).
 import { useState } from "react";
 import { Copy, Check, TriangleAlert } from "lucide-react";
+import { t } from "./i18n";
 
 export function Modal({ title, onClose, children, width = 420 }: {
   title: string; onClose: () => void; children: React.ReactNode; width?: number;
@@ -12,7 +13,7 @@ export function Modal({ title, onClose, children, width = 420 }: {
         style={{ width, fontFamily: "Inter, sans-serif" }} onClick={(e) => e.stopPropagation()}>
         <div className="flex items-center justify-between">
           <span className="text-sm font-semibold text-black">{title}</span>
-          <button onClick={onClose} className="text-xs text-black/40 hover:text-black">Close</button>
+          <button onClick={onClose} className="text-xs text-black/40 hover:text-black">{t("Close", "إغلاق")}</button>
         </div>
         {children}
       </div>
@@ -51,14 +52,14 @@ export function PrimaryBtn({ children, onClick, disabled, danger }: {
 
 export function GhostBtn({ children, onClick, danger }: { children: React.ReactNode; onClick?: () => void; danger?: boolean }) {
   return (
-    <button onClick={onClick} className="text-xs px-4 py-2 rounded-lg border border-black/10 hover:bg-black/[0.04]"
+    <button onClick={onClick} className="text-xs px-4 py-2 rounded-lg border border-black/10 hover:bg-black/[0.08]"
       style={danger ? { color: "#D9534F" } : { color: "#000" }}>
       {children}
     </button>
   );
 }
 
-export function ConfirmModal({ title, body, confirmLabel = "Confirm", danger = true, onCancel, onConfirm }: {
+export function ConfirmModal({ title, body, confirmLabel = t("Confirm", "تأكيد"), danger = true, onCancel, onConfirm }: {
   title: string; body: React.ReactNode; confirmLabel?: string; danger?: boolean;
   onCancel: () => void; onConfirm: () => void;
 }) {
@@ -71,7 +72,7 @@ export function ConfirmModal({ title, body, confirmLabel = "Confirm", danger = t
         <div className="text-xs text-black/60 leading-5">{body}</div>
       </div>
       <div className="flex gap-2 justify-end">
-        <GhostBtn onClick={onCancel}>Cancel</GhostBtn>
+        <GhostBtn onClick={onCancel}>{t("Cancel", "إلغاء")}</GhostBtn>
         <PrimaryBtn danger={danger} onClick={onConfirm}>{confirmLabel}</PrimaryBtn>
       </div>
     </Modal>
@@ -90,7 +91,7 @@ export function CopyRow({ label, value, mono = true }: { label: string; value: s
       <span className="text-xs text-black/50">{label}</span>
       <div className="flex items-center gap-2 bg-black/[0.03] rounded-lg px-3 py-2">
         <span className={`text-xs text-black break-all flex-1 ${mono ? "font-mono" : ""}`}>{value}</span>
-        <button onClick={copy} title="Copy" className="p-1 rounded hover:bg-black/[0.06] shrink-0">
+        <button onClick={copy} title={t("Copy", "نسخ")} className="p-1 rounded hover:bg-black/[0.08] shrink-0">
           {copied ? <Check size={13} style={{ color: "#4AA785" }} /> : <Copy size={13} className="text-black/40" />}
         </button>
       </div>
@@ -105,10 +106,10 @@ export function SecretModal({ title, note, rows, onClose }: {
   return (
     <Modal title={title} onClose={onClose} width={460}>
       <div className="rounded-xl p-3 text-xs leading-5" style={{ background: "#fdf3e0", color: "#8a6100" }}>
-        {note} <b>This is shown once and cannot be retrieved again.</b>
+        {note} <b>{t("This is shown once and cannot be retrieved again.", "يُعرض هذا مرة واحدة فقط ولا يمكن استرجاعه لاحقًا.")}</b>
       </div>
       {rows.map((r) => <CopyRow key={r.label} label={r.label} value={r.value} />)}
-      <div className="flex justify-end"><PrimaryBtn onClick={onClose}>Done — stored safely</PrimaryBtn></div>
+      <div className="flex justify-end"><PrimaryBtn onClick={onClose}>{t("Done — stored safely", "تم — محفوظ بأمان")}</PrimaryBtn></div>
     </Modal>
   );
 }
