@@ -60,3 +60,7 @@ opendata-mcp/
 
 # Screen recordings (not project source)
 *.mp4
+
+# Office lock files
+~$*
+**/~$*
